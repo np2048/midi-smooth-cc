@@ -1,0 +1,46 @@
+# midi-smooth-cc/lv2/plugin.ttl.in
+
+# =============================================================================
+# LV2 plugin description for MIDI Smooth CC
+#
+# Processed by CMake's configure_file() into plugin.ttl inside the bundle
+# directory. Declares the plugin's metadata, required features, and ports.
+#
+# Carla refuses to load plugins whose TTL declares a required feature that the
+# binary does not provide, or whose port indices do not match the order in
+# which lv2_descriptor() registers them in plugin.cpp.
+# =============================================================================
+@prefix lv2:    <http://lv2plug.in/ns/lv2core#> .
+@prefix doap:   <http://usefulinc.com/ns/doap#> .
+@prefix foaf:   <http://xmlns.com/foaf/0.1/> .
+@prefix urid:   <http://lv2plug.in/ns/ext/urid#> .
+@prefix atom:   <http://lv2plug.in/ns/ext/atom#> .
+@prefix midi:   <http://lv2plug.in/ns/ext/midi#> .
+@prefix work:   <http://lv2plug.in/ns/ext/worker#> .
+@prefix opts:   <http://lv2plug.in/ns/ext/options#> .
+
+<urn:midi-smooth-cc:plugin>
+    a lv2:Plugin ,
+      lv2:MIDIPlugin ;
+
+    doap:name "MIDI Smooth CC" ;
+    doap:license <https://www.gnu.org/licenses/gpl-3.0-or-later.html> ;
+    doap:shortdesc "Real-time MIDI CC smoothing for breath controllers and EWI" ;
+    doap:description
+        """Smoothes noisy, quantized, or rapidly fluctuating MIDI Control Change
+values using time-aware exponential filtering or slew-rate limiting. Maintains
+independent filter state for every (channel, CC number) pair.""" ;
+
+    # Host MUST pass a URID map feature so we can resolve atom:AtomTransfer
+    # and midi:MidiEvent URIs in instantiate().
+    lv2:requiredFeature urid:map ,
+                        <http://lv2plug.in/ns/ext/buf-size#boundedBlockLength> ;
+
+    # Real-time safety declaration - host may run us in the audio thread.
+    lv2:optionalFeature lv2:hardRTCapable ,
+                        <http://lv2plug.in/ns/ext/worker#schedule> ;
+
+    # Port group declaration; empty list as placeholder.
+    lv2:port [] .
+
+# End of plugin.ttl.in

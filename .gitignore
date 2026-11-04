@@ -1,5 +1,7 @@
 # midi-smooth-cc/.gitignore
 
+tmp/**
+
 # Build outputs
 build/
 build-*/
