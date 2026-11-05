@@ -18,10 +18,11 @@
 // =============================================================================
 #include "plugin.hpp"
 
-// LV2 headers - included here, NOT in the public plugin.hpp, so the rest of
-// the project does not transitively depend on LV2.
-#include "lv2/lv2plug.in/ns/lv2core/lv2.h"
-#include "lv2/lv2plug.in/ns/ext/urid/urid.h"
+// Additional LV2 extension headers needed by the implementation. The core
+// lv2.h and urid.h are already pulled in by plugin.hpp, so this translation
+// unit does not re-include them. atom/util.h provides
+// lv2_atom_sequence_begin / end / next / append_event; midi.h provides the
+// midi:MidiEvent URI and the MIDI message-type constants.
 #include "lv2/lv2plug.in/ns/ext/atom/atom.h"
 #include "lv2/lv2plug.in/ns/ext/atom/util.h"
 #include "lv2/lv2plug.in/ns/ext/midi/midi.h"

@@ -28,12 +28,15 @@
 
 #include <cstdint>
 
-// Forward-declare LV2 handle types so this header stays usable without
-// pulling in the full LV2 C headers in every consumer.
-struct LV2_Handle;
-struct LV2_Descriptor;
-struct LV2_Feature;
-struct LV2_URID_Map;
+// LV2 types such as LV2_Handle, LV2_Feature, LV2_URID_Map, and
+// LV2_Descriptor are typedefs (in most cases typedefs of opaque structs),
+// NOT plain struct tags. Forward declarations like "struct LV2_Handle;" or
+// "struct LV2_URID_Map;" conflict with those typedefs and produce a
+// "conflicting declaration" compile error. The only safe way to make these
+// types visible to this header's declarations is to include the LV2 C
+// headers directly.
+#include "lv2/lv2plug.in/ns/lv2core/lv2.h"
+#include "lv2/lv2plug.in/ns/ext/urid/urid.h"
 
 namespace midi_smooth_cc {
 
