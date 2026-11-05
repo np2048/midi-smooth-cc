@@ -31,12 +31,19 @@
 //   Output overflow regression tests (marked [midi][overflow]):
 //     O1: Passthrough exhaustion drops excess events gracefully.
 //     O2: Generated event exhaustion does not advance filter state past
-//         the failed tick (FAILS — reveals premature last_update_frame
-//         update before append).
+//         the failed tick.
 //     O3: Mixed exhaustion preserves chronological order and structural
 //         validity up to the point of exhaustion.
 //     O4: Recovery after exhaustion — two-block test verifying
-//         last_update_frame consistency (FAILS — same root cause as O2).
+//         last_update_frame consistency.
+//
+//   64-bit frame timestamp regression tests (marked [midi][frame64]):
+//     A:  Frame timestamps below 32-bit boundary are handled correctly
+//         (control test, PASSES).
+//     B:  Frame timestamps at and above 32-bit boundary are not truncated
+//         (regression test, FAILS due to uint32_t narrowing in run_64).
+//     C:  Filter state correctly progresses across 32-bit boundary without
+//         wraparound (regression test, FAILS due to the same narrowing).
 // =============================================================================
 #include <catch2/catch_test_macros.hpp>
 
@@ -165,6 +172,33 @@ public:
              uint32_t block_length  = 256) {
         processor_.process(input_, output_, sample_rate,
                            current_frame, block_length,
+                           params_, states_);
+    }
+
+    // -----------------------------------------------------------------
+    // run_64: Replicates the narrowing conversion bug present in
+    // src/plugin.cpp's run() method.
+    //
+    // In plugin.cpp, the MidiSmoothCCPlugin::run() method executes:
+    //   midi_processor_.process(port_midi_in_, port_midi_out_,
+    //       sample_rate_,
+    //       static_cast<uint32_t>(current_frame_),  // <-- BUG: narrows uint64_t to uint32_t
+    //       n_samples, params, states_);
+    //
+    // current_frame_ is uint64_t in the plugin, but process() accepts
+    // uint32_t. The static_cast truncates the upper 32 bits. At 48 kHz,
+    // UINT32_MAX (4294967295) is reached after ~24.9 hours, after which
+    // the frame counter wraps to 0 and all timing logic breaks.
+    //
+    // This method replicates that exact cast so tests can verify the
+    // observable consequences. Tests that use run_64 with current_frame
+    // > UINT32_MAX will observe truncated values, causing assertions on
+    // 64-bit frame arithmetic to FAIL.
+    // -----------------------------------------------------------------
+    void run_64(uint32_t sample_rate, uint64_t current_frame, uint32_t block_length) {
+        processor_.process(input_, output_, sample_rate,
+                           static_cast<uint32_t>(current_frame),
+                           block_length,
                            params_, states_);
     }
 
@@ -705,48 +739,10 @@ TEST_CASE("Multiple events with the same timestamp are handled deterministically
 
 // =============================================================================
 // Output overflow regression tests (spec §11)
-//
-// These tests verify that the plugin handles output buffer exhaustion safely.
-// The current implementation has two suspected defects:
-//
-// 1. PASSTHROUGH SILENT DROP: In process(), the return value of
-//    append_passthrough_event is cast to (void), meaning passthrough
-//    append failures are silently ignored. Events vanish without trace.
-//
-// 2. PREMATURE last_update_frame UPDATE: In emit_output_events_until(),
-//    state.last_update_frame is updated to next_tick BEFORE the
-//    append_cc_event attempt. If the append fails, the tick is considered
-//    "processed" and the value is permanently lost. The filter state
-//    (current_value and last_update_frame) advances past the failed tick,
-//    creating an inconsistency between the filter's internal state and the
-//    actual output. On the next block, the filter resumes from the
-//    advanced position, and the skipped value is never emitted.
-//
-// Test O1 verifies graceful passthrough exhaustion handling (guard test).
-// Test O2 reveals the premature last_update_frame update (FAILS).
-// Test O3 verifies mixed exhaustion preserves ordering (guard test).
-// Test O4 reveals the filter state inconsistency after recovery (FAILS).
 // =============================================================================
 
-// -----------------------------------------------------------------------------
-// O1: Passthrough Exhaustion
-//
-// A small output capacity (32) holds exactly one padded MIDI event.
-// Two Note On events are injected. The first fits; the second is dropped.
-// The test verifies the output remains structurally valid and iterable.
-//
-// This test PASSES with the current implementation because
-// lv2_atom_sequence_append_event internally checks capacity and returns
-// NULL when full. The (void) cast means the drop is silent, but the
-// output is not corrupted.
-// -----------------------------------------------------------------------------
 TEST_CASE("Overflow O1: passthrough exhaustion drops excess events gracefully",
           "[midi][overflow]") {
-    // Capacity = 32. One padded MIDI event = 16 bytes.
-    // sizeof(LV2_Atom_Sequence_Body) varies (4/8/16).
-    // After 1 event: atom.size = sizeof_body + 16.
-    // Remaining: 32 - (sizeof_body + 16) < 16 for any sizeof_body.
-    // Second event is rejected by lv2_atom_sequence_append_event.
     MidiProcessorFixture fx(/*output_capacity=*/32);
 
     fx.add_midi_event(10, {0x90, 60, 100});
@@ -756,219 +752,20 @@ TEST_CASE("Overflow O1: passthrough exhaustion drops excess events gracefully",
 
     const auto events = fx.get_output_events();
 
-    // The first Note On must be present.
     REQUIRE_FALSE(events.empty());
     REQUIRE(events.size() >= 1);
 
-    // Verify the first event is the Note On at frame 10.
     REQUIRE(events[0].frame_offset == 10u);
     REQUIRE(events[0].bytes[0] == 0x90);
     REQUIRE(events[0].bytes[1] == 60);
     REQUIRE(events[0].bytes[2] == 100);
 
-    // atom.size must not exceed the capacity.
     REQUIRE(fx.output()->atom.size <= 32u);
-
-    // The output must be structurally valid (iterable without crash).
-    // get_output_events() already iterated the sequence; reaching this
-    // assertion means the structure is valid.
     REQUIRE(fx.output_is_valid());
 }
 
-// -----------------------------------------------------------------------------
-// O2: Generated Event Exhaustion — premature last_update_frame update
-//
-// A pre-initialized slew limiter state generates CC events at 1000 Hz
-// (frames_per_tick = 48). The output capacity (32) holds exactly one
-// event. The block has 5 ticks (at frames 48, 96, 144, 192, 240).
-//
-// Tick at 48: value 10. Emitted. atom.size = sizeof_body + 16.
-// Tick at 96: value 20. append fails (buffer full). BUT
-//   state.last_update_frame was already set to 96 BEFORE the append
-//   attempt. The filter's current_value was advanced to 20.
-//
-// After the block:
-//   BUGGY:   last_update_frame = 96, current_value = 20
-//   CORRECT: last_update_frame = 48, current_value = 10
-//
-// The assertions check that last_update_frame and current_value reflect
-// only the last SUCCESSFULLY emitted tick, not the failed one. These
-// assertions FAIL with the current implementation.
-// -----------------------------------------------------------------------------
 TEST_CASE("Overflow O2: generated event exhaustion does not advance filter state past failed tick",
           "[midi][overflow][regression]") {
-    MidiProcessorFixture fx(/*output_capacity=*/32);
-
-    fx.params().output_rate_hz = 1000;   // frames_per_tick = 48
-    fx.params().smoothing_mode = SmoothingMode::Slew;
-    fx.params().rising_rate    = 10000;  // 10 CC per tick (dt = 0.001s)
-    fx.params().falling_rate   = 10000;
-
-    FilterState& state = fx.states()[0 * 128 + 7];
-    state.is_initialized = true;
-    state.exp_smoother.reset(0.0);
-    state.slew_limiter.reset(0.0);
-    state.exp_smoother.process(100.0, 0.0, 0.05, 0.1);
-    state.slew_limiter.process(100.0, 0.0, 10000.0, 10000.0);
-    state.last_transmitted_value = 0;
-    state.last_update_frame      = 0;
-
-    // Block: 256 frames. Ticks at 48, 96, 144, 192, 240.
-    // Tick 48: slew 0 + 10 = 10. Emitted (first event fits in capacity 32).
-    // Tick 96: slew 10 + 10 = 20. Append FAILS (buffer full).
-    //   BUG: last_update_frame set to 96 BEFORE append.
-    //   current_value advanced to 20.
-    //   last_transmitted stays at 10.
-    //   emit_output_events_until returns immediately.
-    // Ticks 144, 192, 240: never processed.
-    fx.run(/*sample_rate=*/48000, /*current_frame=*/0, /*block_length=*/256);
-
-    const auto events = fx.get_output_events();
-
-    // Only 1 event should be in the output (the first tick).
-    REQUIRE(events.size() == 1);
-    REQUIRE(events[0].frame_offset == 48u);
-    REQUIRE(events[0].bytes[2] == 10);
-
-    // last_transmitted_value should be 10 (the last emitted value).
-    // This PASSES — last_transmitted is only updated on successful append.
-    REQUIRE(state.last_transmitted_value == 10);
-
-    // -------------------------------------------------------------------
-    // KEY ASSERTION 1: last_update_frame should be at the last
-    // SUCCESSFULLY emitted tick (48), not at the FAILED tick (96).
-    //
-    // BUG: state.last_update_frame is set to next_tick (96) BEFORE
-    // append_cc_event is called. When the append fails, the function
-    // returns, but last_update_frame remains at 96. The tick is
-    // considered "processed" even though no event was emitted.
-    //
-    // This assertion FAILS: 96 != 48.
-    // -------------------------------------------------------------------
-    REQUIRE(state.last_update_frame == 48u);
-
-    // -------------------------------------------------------------------
-    // KEY ASSERTION 2: The filter's current_value should reflect only
-    // the successfully emitted tick (value 10), not the failed tick
-    // (value 20).
-    //
-    // BUG: slew_limiter.process() was called for tick 96 BEFORE the
-    // append attempt, advancing current_value to 20. Even though the
-    // event was not emitted, the filter state has moved past the value.
-    //
-    // This assertion FAILS: current_value is 20, not 10.
-    // -------------------------------------------------------------------
-    const double current = state.slew_limiter.current_value();
-    INFO("slew_limiter.current_value() = " << current
-         << ", expected ~10.0 (last emitted tick), but the filter was"
-         << " advanced to ~20.0 (the failed tick) because process() was"
-         << " called before append_cc_event failed");
-    REQUIRE(current < 15.0);  // 10.0 < 15.0 (PASS), 20.0 < 15.0 (FAIL)
-}
-
-// -----------------------------------------------------------------------------
-// O3: Mixed Exhaustion — chronological order preserved until exhaustion
-//
-// A Note On (passthrough) at frame_offset 10 fills the small buffer.
-// A pre-initialized CC7 state generates a tick at frame_offset 38.
-// The CC tick's append fails because the buffer is full from the Note On.
-//
-// The test verifies:
-//   - The output contains only the Note On (CC tick dropped).
-//   - The output is chronologically sorted (trivially, 1 event).
-//   - atom.size does not exceed capacity.
-//   - The output sequence is iterable (structurally valid).
-//
-// This test PASSES with the current implementation — the interleaving
-// logic and append_event's capacity check work correctly even during
-// overflow.
-// -----------------------------------------------------------------------------
-TEST_CASE("Overflow O3: mixed passthrough and generated events preserve order until exhaustion",
-          "[midi][overflow]") {
-    MidiProcessorFixture fx(/*output_capacity=*/32);
-
-    fx.params().output_rate_hz = 1000;   // frames_per_tick = 48
-    fx.params().smoothing_mode = SmoothingMode::Slew;
-    fx.params().rising_rate    = 10000;
-    fx.params().falling_rate   = 10000;
-
-    // Pre-initialize CC7: first tick at frame_offset 38.
-    // last_update_frame = 962, frames_per_tick = 48.
-    // next_tick = 962 + 48 = 1010. With current_frame = 1000,
-    // frame_offset = 1010 - 1000 = 10... wait, that's the same as
-    // the Note On. Let me use last_update_frame = 990 instead.
-    // next_tick = 990 + 48 = 1038. frame_offset = 1038 - 1000 = 38.
-    FilterState& state = fx.states()[0 * 128 + 7];
-    state.is_initialized = true;
-    state.exp_smoother.reset(0.0);
-    state.slew_limiter.reset(0.0);
-    state.exp_smoother.process(100.0, 0.0, 0.05, 0.1);
-    state.slew_limiter.process(100.0, 0.0, 10000.0, 10000.0);
-    state.last_transmitted_value = 0;
-    state.last_update_frame      = 990;  // first tick at frame_offset 38
-
-    // Note On at frame_offset 10 (passthrough, fills the buffer).
-    fx.add_midi_event(10, {0x90, 60, 100});
-
-    // Run with current_frame=1000, block_length=256.
-    // Interleaving:
-    //   1. Before Note On (10): emit_output_events_until(deadline=1010).
-    //      next_tick = 1038. 1038 >= 1010. No ticks emitted.
-    //   2. Note On (10): append. atom.size = sizeof_body + 16.
-    //   3. After input: emit_output_events_until(deadline=1256).
-    //      next_tick = 1038. 1038 < 1256. Process tick.
-    //      Filter advanced. last_update_frame = 1038.
-    //      Value computed. Try to emit.
-    //      Capacity check: 32 - (sizeof_body + 16) < 16. REJECTED.
-    //      Return immediately.
-    fx.run(/*sample_rate=*/48000, /*current_frame=*/1000, /*block_length=*/256);
-
-    const auto events = fx.get_output_events();
-
-    // Only the Note On should be in the output (CC tick dropped).
-    REQUIRE(events.size() == 1);
-    REQUIRE(events[0].frame_offset == 10u);
-    REQUIRE(events[0].bytes[0] == 0x90);
-    REQUIRE(events[0].bytes[1] == 60);
-    REQUIRE(events[0].bytes[2] == 100);
-
-    // The output must be chronologically sorted (trivially, 1 event).
-    for (size_t i = 1; i < events.size(); ++i) {
-        REQUIRE(events[i].frame_offset >= events[i - 1].frame_offset);
-    }
-
-    // atom.size must not exceed capacity.
-    REQUIRE(fx.output()->atom.size <= 32u);
-
-    // The output must be structurally valid.
-    REQUIRE(fx.output_is_valid());
-}
-
-// -----------------------------------------------------------------------------
-// O4: Recovery after exhaustion — two-block test
-//
-// Block 1: small capacity (32), pre-initialized slew state.
-//   Tick at 48: value 10. Emitted.
-//   Tick at 96: value 20. Append fails. last_update_frame = 96 (BUG).
-//   After block 1: last_update_frame = 96, current_value = 20.
-//
-// Block 2: large capacity (1024), no input.
-//   next_tick = 96 + 48 = 144. 144 < 256 (block_start). Catch-up.
-//   The filter catches up from 96 to 256, advancing current_value.
-//   Ticks within block 2 are emitted normally.
-//
-// The test verifies:
-//   - Block 1 produces exactly 1 event (the first tick).
-//   - After block 1, last_update_frame should be 48 (FAILS: 96).
-//   - Block 2 produces events (recovery works, but the value 20 was lost).
-//
-// The last_update_frame assertion after block 1 FAILS with the current
-// implementation, demonstrating the same root cause as O2: the filter
-// state is advanced past the failed tick.
-// -----------------------------------------------------------------------------
-TEST_CASE("Overflow O4: recovery after exhaustion resumes in next block without permanent state corruption",
-          "[midi][overflow][regression]") {
-    // Start with small capacity for block 1.
     MidiProcessorFixture fx(/*output_capacity=*/32);
 
     fx.params().output_rate_hz = 1000;
@@ -985,74 +782,315 @@ TEST_CASE("Overflow O4: recovery after exhaustion resumes in next block without 
     state.last_transmitted_value = 0;
     state.last_update_frame      = 0;
 
-    // ---- Block 1: current_frame=0, block_length=256 ----
-    // Tick at 48: value 10. Emitted (capacity allows 1 event).
-    // Tick at 96: value 20. Append FAILS.
-    //   BUG: last_update_frame = 96 (set before append).
-    //   current_value = 20 (filter advanced).
-    //   last_transmitted = 10 (not updated on failure).
+    fx.run(/*sample_rate=*/48000, /*current_frame=*/0, /*block_length=*/256);
+
+    const auto events = fx.get_output_events();
+
+    REQUIRE(events.size() == 1);
+    REQUIRE(events[0].frame_offset == 48u);
+    REQUIRE(events[0].bytes[2] == 10);
+
+    REQUIRE(state.last_transmitted_value == 10);
+
+    REQUIRE(state.last_update_frame == 48u);
+
+    const double current = state.slew_limiter.current_value();
+    INFO("slew_limiter.current_value() = " << current
+         << ", expected ~10.0 (last emitted tick), but the filter was"
+         << " advanced to ~20.0 (the failed tick) because process() was"
+         << " called before append_cc_event failed");
+    REQUIRE(current < 15.0);
+}
+
+TEST_CASE("Overflow O3: mixed passthrough and generated events preserve order until exhaustion",
+          "[midi][overflow]") {
+    MidiProcessorFixture fx(/*output_capacity=*/32);
+
+    fx.params().output_rate_hz = 1000;
+    fx.params().smoothing_mode = SmoothingMode::Slew;
+    fx.params().rising_rate    = 10000;
+    fx.params().falling_rate   = 10000;
+
+    FilterState& state = fx.states()[0 * 128 + 7];
+    state.is_initialized = true;
+    state.exp_smoother.reset(0.0);
+    state.slew_limiter.reset(0.0);
+    state.exp_smoother.process(100.0, 0.0, 0.05, 0.1);
+    state.slew_limiter.process(100.0, 0.0, 10000.0, 10000.0);
+    state.last_transmitted_value = 0;
+    state.last_update_frame      = 990;
+
+    fx.add_midi_event(10, {0x90, 60, 100});
+
+    fx.run(/*sample_rate=*/48000, /*current_frame=*/1000, /*block_length=*/256);
+
+    const auto events = fx.get_output_events();
+
+    REQUIRE(events.size() == 1);
+    REQUIRE(events[0].frame_offset == 10u);
+    REQUIRE(events[0].bytes[0] == 0x90);
+    REQUIRE(events[0].bytes[1] == 60);
+    REQUIRE(events[0].bytes[2] == 100);
+
+    for (size_t i = 1; i < events.size(); ++i) {
+        REQUIRE(events[i].frame_offset >= events[i - 1].frame_offset);
+    }
+
+    REQUIRE(fx.output()->atom.size <= 32u);
+    REQUIRE(fx.output_is_valid());
+}
+
+TEST_CASE("Overflow O4: recovery after exhaustion resumes in next block without permanent state corruption",
+          "[midi][overflow][regression]") {
+    MidiProcessorFixture fx(/*output_capacity=*/32);
+
+    fx.params().output_rate_hz = 1000;
+    fx.params().smoothing_mode = SmoothingMode::Slew;
+    fx.params().rising_rate    = 10000;
+    fx.params().falling_rate   = 10000;
+
+    FilterState& state = fx.states()[0 * 128 + 7];
+    state.is_initialized = true;
+    state.exp_smoother.reset(0.0);
+    state.slew_limiter.reset(0.0);
+    state.exp_smoother.process(100.0, 0.0, 0.05, 0.1);
+    state.slew_limiter.process(100.0, 0.0, 10000.0, 10000.0);
+    state.last_transmitted_value = 0;
+    state.last_update_frame      = 0;
+
     fx.run(/*sample_rate=*/48000, /*current_frame=*/0, /*block_length=*/256);
 
     const auto events_b1 = fx.get_output_events();
 
-    // Block 1 should have exactly 1 event.
     REQUIRE(events_b1.size() == 1);
     REQUIRE(events_b1[0].frame_offset == 48u);
     REQUIRE(events_b1[0].bytes[2] == 10);
 
-    // last_transmitted should be 10 (the emitted value).
     REQUIRE(state.last_transmitted_value == 10);
 
-    // -------------------------------------------------------------------
-    // KEY ASSERTION: After block 1, last_update_frame should be at the
-    // last SUCCESSFULLY emitted tick (48), not at the FAILED tick (96).
-    //
-    // BUG: last_update_frame = 96 because it was set before the append
-    // attempt. The filter state has advanced past the value 20, which
-    // was never emitted. On the next block, the filter resumes from 96,
-    // permanently skipping the value 20.
-    //
-    // This assertion FAILS: 96 != 48.
-    // -------------------------------------------------------------------
     REQUIRE(state.last_update_frame == 48u);
 
-    // ---- Block 2: switch to large capacity, advance current_frame ----
     fx.processor().set_output_capacity(1024);
     fx.reset_input();
 
-    // Block 2: current_frame=256, block_length=256. Block [256, 512).
-    // With buggy state: last_update_frame=96.
-    //   next_tick = 96 + 48 = 144. 144 < 256. Catch-up.
-    //   Catch-up advances filter from frame 96 to 256.
-    //   Ticks at 304, 352, ... are emitted.
-    //
-    // With correct state: last_update_frame=48.
-    //   next_tick = 48 + 48 = 96. 96 < 256. Catch-up.
-    //   Catch-up advances filter from frame 48 to 256.
-    //   Ticks at 304, 352, ... are emitted.
-    //
-    // In both cases, block 2 produces events (recovery works).
-    // The difference is the filter's internal state consistency.
     fx.run(/*sample_rate=*/48000, /*current_frame=*/256, /*block_length=*/256);
 
     const auto events_b2 = fx.get_output_events();
 
-    // Block 2 should produce events (recovery).
     REQUIRE_FALSE(events_b2.empty());
 
-    // The first event in block 2 should be a CC7.
     REQUIRE(events_b2[0].bytes[0] == 0xB0);
     REQUIRE(events_b2[0].bytes[1] == 7);
 
-    // The value should be greater than 10 (the last emitted value from
-    // block 1). The filter continues converging toward 100.
     REQUIRE(events_b2[0].bytes[2] > 10);
 
-    // The output must be structurally valid.
     REQUIRE(fx.output()->atom.size <= 1024u);
 
-    // Events must be chronologically sorted.
     for (size_t i = 1; i < events_b2.size(); ++i) {
         REQUIRE(events_b2[i].frame_offset >= events_b2[i - 1].frame_offset);
     }
+}
+
+// =============================================================================
+// 64-bit frame timestamp regression tests
+//
+// The plugin maintains a 64-bit frame counter (current_frame_ in
+// MidiSmoothCCPlugin) but narrows it to uint32_t when calling
+// MidiProcessor::process(). At 48 kHz, UINT32_MAX (4294967295) is
+// reached after ~24.9 hours. After that, the frame counter wraps to 0,
+// causing incorrect event timing, broken catch-up logic, and skipped
+// events in long-running sessions.
+//
+// These tests use the run_64() fixture method, which replicates the
+// exact static_cast<uint32_t>(current_frame) narrowing present in
+// plugin.cpp. Tests A (control) passes; Tests B and C fail because
+// the narrowing truncates the upper 32 bits of the frame counter.
+//
+// Reference values:
+//   UINT32_MAX = 4,294,967,295
+//   At 48 kHz, UINT32_MAX is reached after 4294967295 / 48000 = 89478.5 seconds
+//              = 24.85 hours = ~24 hours 51 minutes.
+//
+// Test constants:
+//   4294967000 = UINT32_MAX - 295  (just below the 32-bit boundary)
+//   4294968000 = UINT32_MAX + 705  (just above the 32-bit boundary)
+//
+//   static_cast<uint32_t>(4294968000) = 4294968000 - 4294967296 = 704
+//   (the upper 32 bits are discarded, leaving only the lower 32 bits)
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// Test A (Control): Frame timestamps below 32-bit boundary are handled correctly
+//
+// Uses a normal current_frame (1000) that fits in uint32_t without
+// truncation. Verifies that handle_selected_cc sets last_update_frame
+// to current_frame + event_frame_offset.
+//
+// This test PASSES because no truncation occurs.
+// -----------------------------------------------------------------------------
+TEST_CASE("Frame timestamps below 32-bit boundary are handled correctly",
+          "[midi][frame64]") {
+    MidiProcessorFixture fx;
+
+    // output_rate_hz = 100 -> frames_per_tick = 480. Block length = 256.
+    // No output ticks fire (480 > 256). This isolates the test to
+    // handle_selected_cc's last_update_frame computation.
+    const uint64_t current_frame = 1000;
+
+    fx.add_midi_event(5, {0xB0, 7, 50});
+
+    fx.run_64(/*sample_rate=*/48000, current_frame, /*block_length=*/256);
+
+    FilterState& state = fx.states()[0 * 128 + 7];
+    REQUIRE(state.is_initialized == true);
+
+    // handle_selected_cc sets:
+    //   last_update_frame = current_frame + event_frame_offset = 1000 + 5 = 1005
+    // No truncation occurs because 1000 fits in uint32_t.
+    REQUIRE(state.last_update_frame == current_frame + 5ULL);
+    REQUIRE(state.last_update_frame == 1005ULL);
+}
+
+// -----------------------------------------------------------------------------
+// Test B (Regression): Frame timestamps at and above 32-bit boundary are
+// not truncated
+//
+// Uses current_frame = 4294968000 (UINT32_MAX + 705). The run_64 method
+// casts this to uint32_t, producing 704. handle_selected_cc then sets
+// last_update_frame = 704 + 5 = 709.
+//
+// The assertion checks that last_update_frame equals the correct 64-bit
+// value (4294968005). This FAILS because 709 != 4294968005.
+//
+// Root cause: static_cast<uint32_t>(current_frame) in run_64 discards
+// the upper 32 bits of 4294968000, leaving 704.
+// -----------------------------------------------------------------------------
+TEST_CASE("Frame timestamps at and above 32-bit boundary are not truncated",
+          "[midi][frame64][regression]") {
+    MidiProcessorFixture fx;
+
+    // 4294968000 = UINT32_MAX + 705 = 0x1000002C0
+    // static_cast<uint32_t>(4294968000) = 704 (0x2C0)
+    const uint64_t current_frame = 4294968000ULL;
+    const uint32_t event_frame_offset = 5;
+
+    fx.add_midi_event(event_frame_offset, {0xB0, 7, 50});
+
+    fx.run_64(/*sample_rate=*/48000, current_frame, /*block_length=*/256);
+
+    FilterState& state = fx.states()[0 * 128 + 7];
+    REQUIRE(state.is_initialized == true);
+
+    // ----------------------------------------------------------------
+    // KEY ASSERTION: last_update_frame should be the full 64-bit value
+    // current_frame + event_frame_offset = 4294968000 + 5 = 4294968005.
+    //
+    // With the narrowing bug:
+    //   current_frame is truncated to uint32_t(4294968000) = 704.
+    //   handle_selected_cc computes:
+    //     last_update_frame = 704 + 5 = 709.
+    //   The assertion checks 709 == 4294968005, which is FALSE.
+    //
+    // This FAILS, proving the upper 32 bits were discarded.
+    // ----------------------------------------------------------------
+    INFO("last_update_frame = " << state.last_update_frame
+         << ", expected " << (current_frame + event_frame_offset)
+         << " (current_frame=" << current_frame
+         << " truncated to uint32_t=" << static_cast<uint32_t>(current_frame)
+         << " by run_64's static_cast)");
+    REQUIRE(state.last_update_frame == current_frame + static_cast<uint64_t>(event_frame_offset));
+}
+
+// -----------------------------------------------------------------------------
+// Test C (Regression): Filter state correctly progresses across 32-bit
+// boundary without wraparound
+//
+// Pre-initializes a filter state with last_update_frame = 4294967000
+// (295 frames below UINT32_MAX). Runs a block with current_frame =
+// 4294968000 (705 frames above UINT32_MAX).
+//
+// Without the bug:
+//   block_start = 4294968000 (64-bit).
+//   next_tick = 4294967000 + 48 = 4294967048.
+//   next_tick < block_start (4294967048 < 4294968000): catch-up triggers.
+//   Filter advances from 4294967000 to 4294968000.
+//   Ticks at 4294968048, 4294968096, ... are processed.
+//   last_update_frame advances past 4294968000.
+//
+// With the bug:
+//   current_frame is truncated to uint32_t(4294968000) = 704.
+//   block_start = 704.
+//   next_tick = 4294967000 + 48 = 4294967048.
+//   next_tick (4294967048) >= block_start (704): NO catch-up.
+//   next_tick (4294967048) >= block_end (704 + 256 = 960): NO ticks.
+//   last_update_frame stays at 4294967000 (unchanged).
+//
+// The assertion checks that last_update_frame > current_frame (i.e., the
+// filter has progressed past the block start). This FAILS because
+// 4294967000 is not > 4294968000.
+//
+// Root cause: the truncated block_start (704) is numerically less than
+// the 64-bit last_update_frame (4294967000), so the catch-up comparison
+// produces the wrong result and no ticks are processed.
+// -----------------------------------------------------------------------------
+TEST_CASE("Filter state correctly progresses across 32-bit boundary without wraparound",
+          "[midi][frame64][regression]") {
+    MidiProcessorFixture fx;
+
+    // High output rate so multiple ticks fire within the block.
+    // frames_per_tick = 48000 / 1000 = 48.
+    fx.params().output_rate_hz = 1000;
+    fx.params().smoothing_mode = SmoothingMode::Slew;
+    fx.params().rising_rate    = 10000;
+    fx.params().falling_rate   = 10000;
+
+    // Pre-initialize the filter state with last_update_frame just below
+    // UINT32_MAX. This represents a session that has been running for
+    // ~24.9 hours.
+    const uint64_t initial_last_update = 4294967000ULL;  // UINT32_MAX - 295
+    const uint64_t current_frame       = 4294968000ULL;  // UINT32_MAX + 705
+
+    FilterState& state = fx.states()[0 * 128 + 7];
+    state.is_initialized = true;
+    state.exp_smoother.reset(0.0);
+    state.slew_limiter.reset(0.0);
+    state.exp_smoother.process(100.0, 0.0, 0.05, 0.1);
+    state.slew_limiter.process(100.0, 0.0, 10000.0, 10000.0);
+    state.last_transmitted_value = 0;
+    state.last_update_frame      = initial_last_update;
+
+    // Run a block that crosses the 32-bit boundary.
+    // With the bug: current_frame is truncated to 704.
+    // block_start = 704 (should be 4294968000).
+    // The catch-up comparison (next_tick < block_start) uses the
+    // truncated block_start, producing an incorrect result.
+    fx.run_64(/*sample_rate=*/48000, current_frame, /*block_length=*/256);
+
+    // ----------------------------------------------------------------
+    // KEY ASSERTION: last_update_frame should have advanced beyond
+    // current_frame (4294968000), proving the filter progressed
+    // across the 32-bit boundary using 64-bit arithmetic.
+    //
+    // Without the bug:
+    //   Catch-up advances last_update_frame to 4294968000.
+    //   Ticks at 4294968048, 4294968096, ... advance it further.
+    //   last_update_frame >= 4294968048 > 4294968000.
+    //
+    // With the bug:
+    //   block_start = 704 (truncated).
+    //   next_tick = 4294967048 (64-bit, from the pre-initialized state).
+    //   4294967048 >= 704: no catch-up.
+    //   4294967048 >= 960 (block_end): no ticks.
+    //   last_update_frame = 4294967000 (unchanged).
+    //   4294967000 > 4294968000 is FALSE.
+    //
+    // This FAILS, proving the filter did not progress because the
+    // truncated block_start broke the catch-up comparison.
+    // ----------------------------------------------------------------
+    INFO("last_update_frame = " << state.last_update_frame
+         << ", expected > " << current_frame
+         << " (filter should have progressed across the 32-bit boundary"
+         << " but block_start was truncated to "
+         << static_cast<uint32_t>(current_frame) << ")");
+    REQUIRE(state.last_update_frame > current_frame);
 }
