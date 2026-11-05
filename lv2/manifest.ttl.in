@@ -3,17 +3,25 @@
 # =============================================================================
 # LV2 bundle manifest for MIDI Smooth CC
 #
-# This file is processed by CMake's configure_file() into manifest.ttl inside
-# the build / install bundle directory. The host (Carla) reads this file to
-# discover the plugin URI and the binary that implements it.
+# This file is processed by CMake's configure_file() into manifest.ttl
+# inside the build / install bundle directory. The host (Carla) reads this
+# file to discover the plugin URI, the shared library that implements it,
+# and the Turtle file that describes its ports and metadata.
+#
+# CMake substitutes @MIDI_SMOOTH_CC_URI@ with the literal string
+# "urn:midi-smooth-cc:plugin", producing:
+#
+#     <urn:midi-smooth-cc:plugin>
+#         a lv2:Plugin ;
+#         lv2:binary <midi-smooth-cc.so> ;
+#         rdfs:seeAlso <plugin.ttl> .
 #
 # Reference: http://lv2plug.in/ns/lv2core/
 # =============================================================================
 @prefix lv2:  <http://lv2plug.in/ns/lv2core#> .
 @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
 
-# Plugin URI - matches lv2_descriptor() URI string in src/plugin.cpp
-<urn:midi-smooth-cc:plugin>
+<@MIDI_SMOOTH_CC_URI@>
     a lv2:Plugin ;
     lv2:binary <midi-smooth-cc.so> ;
     rdfs:seeAlso <plugin.ttl> .
