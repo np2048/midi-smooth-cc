@@ -7,30 +7,17 @@
 // callbacks: instantiate / connect_port / activate / run / deactivate /
 // cleanup / extension_data.
 //
-// The plugin URI MUST be "urn:midi-smooth-cc:plugin" and must match the
-// subject of manifest.ttl.in and plugin.ttl.in exactly.
+// 64-BIT FRAME COUNTER:
+//   current_frame_ is uint64_t. In run(), it is passed directly to
+//   midi_processor_.process() without any static_cast<uint32_t>. The
+//   process() method accepts uint64_t. This prevents the frame counter
+//   from wrapping at UINT32_MAX (~24.9 hours at 48 kHz), which would
+//   break all timing and catch-up logic in long-running sessions.
 //
 // Real-time safety (spec §11, Golden Rules 1-3):
-//   1. No dynamic allocation (new/delete, std::vector, std::string) in
-//      run(), activate(), or deactivate(). The ONLY place `new` and
-//      `delete` appear is in instantiate() and cleanup() respectively.
-//   2. Uses the modern LV2 Atom Sequence API (lv2_atom_sequence_*),
-//      delegated entirely to MidiProcessor.
-//   3. No mutexes. Control port values are read once at the top of run()
-//      into a local PluginParameters snapshot and used throughout the
-//      block. The host guarantees connect_port() is called outside run().
-//
-// Buffer capacity handling:
-//   The plugin queries the host's buf-size#sequenceSize feature during
-//   instantiate() to learn the exact byte capacity of the output MIDI
-//   atom sequence port buffer. This value is passed as the third
-//   constructor argument to MidiSmoothCCPlugin, which forwards it to
-//   MidiProcessor::set_output_capacity(). This ensures
-//   lv2_atom_sequence_append_event() uses the CORRECT capacity for its
-//   bounds check, preventing out-of-bounds writes when the host allocates
-//   a smaller buffer than the plugin's default of 16384.
-//   If the host does not provide the feature, the plugin falls back to
-//   16384 bytes (a safe default for typical host configurations).
+//   1. No dynamic allocation in run(), activate(), or deactivate().
+//   2. Uses the modern LV2 Atom Sequence API.
+//   3. No mutexes. Parameters are read once at the top of run().
 // =============================================================================
 #include "plugin.hpp"
 
@@ -46,32 +33,18 @@ namespace midi_smooth_cc {
 
 // =============================================================================
 // Constructor
-//
-// Called once by the extern "C" instantiate() wrapper (host thread, non-
-// real-time). Heap allocation is permitted here.
-//
-// The output_capacity parameter is the byte capacity of the output MIDI
-// atom sequence port buffer, as reported by the host's
-// buf-size#sequenceSize feature. It is forwarded directly to
-// MidiProcessor::set_output_capacity() so that the processor's
-// lv2_atom_sequence_append_event() calls use the correct capacity.
 // =============================================================================
 MidiSmoothCCPlugin::MidiSmoothCCPlugin(double sample_rate,
                                        LV2_URID_Map* urid_map,
                                        uint32_t output_capacity)
     : sample_rate_(sample_rate > 0.0 ? static_cast<uint32_t>(sample_rate) : 44100u)
     , current_frame_(0u) {
-    // Map the midi:MidiEvent URI to an integer URID via the host's URID
-    // map feature. This URID is used by MidiProcessor to identify MIDI
-    // events inside LV2 Atom Sequences.
     if (urid_map != nullptr && urid_map->map != nullptr) {
         const LV2_URID midi_urid =
             urid_map->map(urid_map->handle, LV2_MIDI__MidiEvent);
         midi_processor_.set_midi_urid(midi_urid);
     }
 
-    // Set the output buffer capacity from the host-provided value (or
-    // the default 16384 if the host did not provide buf-size#sequenceSize).
     midi_processor_.set_output_capacity(output_capacity);
 }
 
@@ -142,6 +115,12 @@ void MidiSmoothCCPlugin::activate() {
 
 // =============================================================================
 // run -- THE CRITICAL REAL-TIME CALLBACK
+//
+// current_frame_ (uint64_t) is passed DIRECTLY to process() without any
+// narrowing cast. This is the key fix for the 64-bit timestamp defect:
+// the previous code executed static_cast<uint32_t>(current_frame_),
+// which discarded the upper 32 bits and caused wraparound after ~24.9
+// hours at 48 kHz.
 // =============================================================================
 void MidiSmoothCCPlugin::run(uint32_t n_samples) {
     const auto read_float = [](float* port, float default_val) -> float {
@@ -188,16 +167,26 @@ void MidiSmoothCCPlugin::run(uint32_t n_samples) {
     }
 
     if (port_midi_in_ != nullptr && port_midi_out_ != nullptr) {
+        // ----------------------------------------------------------------
+        // KEY FIX: Pass current_frame_ directly as uint64_t.
+        // The previous code had:
+        //   static_cast<uint32_t>(current_frame_)
+        // which truncated the upper 32 bits, causing wraparound after
+        // ~24.9 hours at 48 kHz. Now process() accepts uint64_t, and
+        // current_frame_ is passed without any cast.
+        // ----------------------------------------------------------------
         midi_processor_.process(
             port_midi_in_,
             port_midi_out_,
             sample_rate_,
-            static_cast<uint32_t>(current_frame_),
+            current_frame_,
             n_samples,
             params,
             states_);
     }
 
+    // Advance the global frame counter. uint64_t + uint32_t promotes
+    // to uint64_t. No truncation.
     current_frame_ += static_cast<uint64_t>(n_samples);
 }
 
@@ -210,26 +199,6 @@ extern "C" {
 
 static const char* const kMidiSmoothCC_URI = "urn:midi-smooth-cc:plugin";
 
-// -------------------------------------------------------------------------
-// instantiate -- create a new plugin instance (non-real-time).
-//
-// This function iterates the host-provided features array to find:
-//   1. urid:map (REQUIRED) -- for mapping midi:MidiEvent to a URID.
-//   2. buf-size#sequenceSize (OPTIONAL) -- for learning the exact byte
-//      capacity of the output MIDI atom sequence port buffer.
-//
-// The buf-size#sequenceSize feature's data pointer points to a uint32_t
-// value specifying the maximum size in bytes of an atom:Sequence port
-// buffer allocated by the host. This value is passed as the third
-// constructor argument to MidiSmoothCCPlugin, which forwards it to
-// MidiProcessor::set_output_capacity(). This ensures
-// lv2_atom_sequence_append_event() performs its capacity check against
-// the ACTUAL buffer size rather than a hardcoded guess, preventing
-// out-of-bounds writes when the host allocates a smaller buffer.
-//
-// If the host does not provide buf-size#sequenceSize, the plugin uses
-// a default of 16384 bytes, which is safe for typical host configurations.
-// -------------------------------------------------------------------------
 static LV2_Handle instantiate(const LV2_Descriptor*     descriptor,
                               double                    sample_rate,
                               const char*               bundle_path,
@@ -237,21 +206,16 @@ static LV2_Handle instantiate(const LV2_Descriptor*     descriptor,
     (void)descriptor;
     (void)bundle_path;
 
-    // Find required and optional features in the host-provided array.
     LV2_URID_Map* urid_map       = nullptr;
-    uint32_t      seq_size       = 16384u;  // default fallback
+    uint32_t      seq_size       = 16384u;
 
     if (features != nullptr) {
         for (const LV2_Feature* const* fp = features; *fp != nullptr; ++fp) {
             const LV2_Feature* f = *fp;
 
-            // Required: urid:map -- for mapping MIDI event URIs.
             if (std::strcmp(f->URI, LV2_URID__map) == 0) {
                 urid_map = static_cast<LV2_URID_Map*>(f->data);
             }
-            // Optional: buf-size#sequenceSize -- the actual output buffer
-            // capacity in bytes allocated by the host for atom:Sequence
-            // ports. The data pointer points to a uint32_t value.
             else if (std::strcmp(f->URI, LV2_BUF_SIZE__sequenceSize) == 0) {
                 if (f->data != nullptr) {
                     seq_size = *static_cast<const uint32_t*>(f->data);
@@ -260,15 +224,11 @@ static LV2_Handle instantiate(const LV2_Descriptor*     descriptor,
         }
     }
 
-    // Required feature not provided -- refuse to instantiate.
     if (urid_map == nullptr) {
         return nullptr;
     }
 
     try {
-        // Pass the resolved output capacity (host-provided or default) as
-        // the third constructor argument. The constructor forwards it to
-        // midi_processor_.set_output_capacity().
         auto* plugin = new midi_smooth_cc::MidiSmoothCCPlugin(
             sample_rate, urid_map, seq_size);
         return static_cast<LV2_Handle>(plugin);

@@ -41,9 +41,9 @@
 //     A:  Frame timestamps below 32-bit boundary are handled correctly
 //         (control test, PASSES).
 //     B:  Frame timestamps at and above 32-bit boundary are not truncated
-//         (regression test, FAILS due to uint32_t narrowing in run_64).
+//         (regression test, now PASSES after the production fix).
 //     C:  Filter state correctly progresses across 32-bit boundary without
-//         wraparound (regression test, FAILS due to the same narrowing).
+//         wraparound (regression test, now PASSES after the production fix).
 // =============================================================================
 #include <catch2/catch_test_macros.hpp>
 
@@ -176,28 +176,23 @@ public:
     }
 
     // -----------------------------------------------------------------
-    // run_64: Replicates the narrowing conversion bug present in
-    // src/plugin.cpp's run() method.
+    // run_64: Passes a 64-bit current_frame directly to process().
     //
-    // In plugin.cpp, the MidiSmoothCCPlugin::run() method executes:
-    //   midi_processor_.process(port_midi_in_, port_midi_out_,
-    //       sample_rate_,
-    //       static_cast<uint32_t>(current_frame_),  // <-- BUG: narrows uint64_t to uint32_t
-    //       n_samples, params, states_);
+    // MidiProcessor::process() now accepts uint64_t current_frame
+    // (fixed in the production code). This method passes the full
+    // 64-bit value without any narrowing cast, allowing tests to
+    // verify correct behavior at and above the 32-bit boundary
+    // (UINT32_MAX = 4,294,967,295, reached after ~24.9 hours at
+    // 48 kHz).
     //
-    // current_frame_ is uint64_t in the plugin, but process() accepts
-    // uint32_t. The static_cast truncates the upper 32 bits. At 48 kHz,
-    // UINT32_MAX (4294967295) is reached after ~24.9 hours, after which
-    // the frame counter wraps to 0 and all timing logic breaks.
-    //
-    // This method replicates that exact cast so tests can verify the
-    // observable consequences. Tests that use run_64 with current_frame
-    // > UINT32_MAX will observe truncated values, causing assertions on
-    // 64-bit frame arithmetic to FAIL.
+    // Previously, this method contained static_cast<uint32_t>(
+    // current_frame) to replicate a production bug where plugin.cpp
+    // narrowed current_frame_ before calling process(). That bug has
+    // been fixed in the production code, so the cast has been removed.
     // -----------------------------------------------------------------
     void run_64(uint32_t sample_rate, uint64_t current_frame, uint32_t block_length) {
         processor_.process(input_, output_, sample_rate,
-                           static_cast<uint32_t>(current_frame),
+                           current_frame,
                            block_length,
                            params_, states_);
     }
@@ -895,28 +890,22 @@ TEST_CASE("Overflow O4: recovery after exhaustion resumes in next block without 
 // 64-bit frame timestamp regression tests
 //
 // The plugin maintains a 64-bit frame counter (current_frame_ in
-// MidiSmoothCCPlugin) but narrows it to uint32_t when calling
-// MidiProcessor::process(). At 48 kHz, UINT32_MAX (4294967295) is
-// reached after ~24.9 hours. After that, the frame counter wraps to 0,
-// causing incorrect event timing, broken catch-up logic, and skipped
-// events in long-running sessions.
+// MidiSmoothCCPlugin) and passes it directly to MidiProcessor::process()
+// as uint64_t. This supports sessions longer than ~24.9 hours at 48 kHz
+// (the point at which a 32-bit frame counter would wrap).
 //
-// These tests use the run_64() fixture method, which replicates the
-// exact static_cast<uint32_t>(current_frame) narrowing present in
-// plugin.cpp. Tests A (control) passes; Tests B and C fail because
-// the narrowing truncates the upper 32 bits of the frame counter.
+// The run_64() fixture method passes the full uint64_t current_frame
+// to process() without any narrowing cast. These tests verify correct
+// behavior below, at, and above the 32-bit boundary.
 //
 // Reference values:
 //   UINT32_MAX = 4,294,967,295
-//   At 48 kHz, UINT32_MAX is reached after 4294967295 / 48000 = 89478.5 seconds
-//              = 24.85 hours = ~24 hours 51 minutes.
+//   At 48 kHz, UINT32_MAX is reached after 4294967295 / 48000 = 89478.5
+//   seconds = 24.85 hours = ~24 hours 51 minutes.
 //
 // Test constants:
 //   4294967000 = UINT32_MAX - 295  (just below the 32-bit boundary)
 //   4294968000 = UINT32_MAX + 705  (just above the 32-bit boundary)
-//
-//   static_cast<uint32_t>(4294968000) = 4294968000 - 4294967296 = 704
-//   (the upper 32 bits are discarded, leaving only the lower 32 bits)
 // =============================================================================
 
 // -----------------------------------------------------------------------------
@@ -925,8 +914,6 @@ TEST_CASE("Overflow O4: recovery after exhaustion resumes in next block without 
 // Uses a normal current_frame (1000) that fits in uint32_t without
 // truncation. Verifies that handle_selected_cc sets last_update_frame
 // to current_frame + event_frame_offset.
-//
-// This test PASSES because no truncation occurs.
 // -----------------------------------------------------------------------------
 TEST_CASE("Frame timestamps below 32-bit boundary are handled correctly",
           "[midi][frame64]") {
@@ -946,7 +933,6 @@ TEST_CASE("Frame timestamps below 32-bit boundary are handled correctly",
 
     // handle_selected_cc sets:
     //   last_update_frame = current_frame + event_frame_offset = 1000 + 5 = 1005
-    // No truncation occurs because 1000 fits in uint32_t.
     REQUIRE(state.last_update_frame == current_frame + 5ULL);
     REQUIRE(state.last_update_frame == 1005ULL);
 }
@@ -955,22 +941,19 @@ TEST_CASE("Frame timestamps below 32-bit boundary are handled correctly",
 // Test B (Regression): Frame timestamps at and above 32-bit boundary are
 // not truncated
 //
-// Uses current_frame = 4294968000 (UINT32_MAX + 705). The run_64 method
-// casts this to uint32_t, producing 704. handle_selected_cc then sets
-// last_update_frame = 704 + 5 = 709.
+// Uses current_frame = 4294968000 (UINT32_MAX + 705). run_64 passes this
+// as uint64_t directly to process(). handle_selected_cc computes
+// last_update_frame = 4294968000 + 5 = 4294968005 using 64-bit arithmetic.
 //
 // The assertion checks that last_update_frame equals the correct 64-bit
-// value (4294968005). This FAILS because 709 != 4294968005.
-//
-// Root cause: static_cast<uint32_t>(current_frame) in run_64 discards
-// the upper 32 bits of 4294968000, leaving 704.
+// value. This PASSES because process() accepts uint64_t and no
+// truncation occurs.
 // -----------------------------------------------------------------------------
 TEST_CASE("Frame timestamps at and above 32-bit boundary are not truncated",
           "[midi][frame64][regression]") {
     MidiProcessorFixture fx;
 
     // 4294968000 = UINT32_MAX + 705 = 0x1000002C0
-    // static_cast<uint32_t>(4294968000) = 704 (0x2C0)
     const uint64_t current_frame = 4294968000ULL;
     const uint32_t event_frame_offset = 5;
 
@@ -981,23 +964,11 @@ TEST_CASE("Frame timestamps at and above 32-bit boundary are not truncated",
     FilterState& state = fx.states()[0 * 128 + 7];
     REQUIRE(state.is_initialized == true);
 
-    // ----------------------------------------------------------------
-    // KEY ASSERTION: last_update_frame should be the full 64-bit value
-    // current_frame + event_frame_offset = 4294968000 + 5 = 4294968005.
-    //
-    // With the narrowing bug:
-    //   current_frame is truncated to uint32_t(4294968000) = 704.
-    //   handle_selected_cc computes:
-    //     last_update_frame = 704 + 5 = 709.
-    //   The assertion checks 709 == 4294968005, which is FALSE.
-    //
-    // This FAILS, proving the upper 32 bits were discarded.
-    // ----------------------------------------------------------------
+    // process() receives current_frame as uint64_t. handle_selected_cc
+    // computes last_update_frame = 4294968000 + 5 = 4294968005 using
+    // 64-bit arithmetic. No truncation occurs.
     INFO("last_update_frame = " << state.last_update_frame
-         << ", expected " << (current_frame + event_frame_offset)
-         << " (current_frame=" << current_frame
-         << " truncated to uint32_t=" << static_cast<uint32_t>(current_frame)
-         << " by run_64's static_cast)");
+         << ", expected " << (current_frame + event_frame_offset));
     REQUIRE(state.last_update_frame == current_frame + static_cast<uint64_t>(event_frame_offset));
 }
 
@@ -1009,29 +980,14 @@ TEST_CASE("Frame timestamps at and above 32-bit boundary are not truncated",
 // (295 frames below UINT32_MAX). Runs a block with current_frame =
 // 4294968000 (705 frames above UINT32_MAX).
 //
-// Without the bug:
-//   block_start = 4294968000 (64-bit).
-//   next_tick = 4294967000 + 48 = 4294967048.
-//   next_tick < block_start (4294967048 < 4294968000): catch-up triggers.
-//   Filter advances from 4294967000 to 4294968000.
-//   Ticks at 4294968048, 4294968096, ... are processed.
-//   last_update_frame advances past 4294968000.
+// process() receives current_frame as uint64_t. block_start = 4294968000.
+// next_tick = 4294967000 + 48 = 4294967048. Since 4294967048 <
+// 4294968000 (block_start), catch-up triggers. The filter advances
+// from 4294967000 to 4294968000. Ticks at 4294968048, 4294968096, ...
+// are processed. last_update_frame advances past 4294968000.
 //
-// With the bug:
-//   current_frame is truncated to uint32_t(4294968000) = 704.
-//   block_start = 704.
-//   next_tick = 4294967000 + 48 = 4294967048.
-//   next_tick (4294967048) >= block_start (704): NO catch-up.
-//   next_tick (4294967048) >= block_end (704 + 256 = 960): NO ticks.
-//   last_update_frame stays at 4294967000 (unchanged).
-//
-// The assertion checks that last_update_frame > current_frame (i.e., the
-// filter has progressed past the block start). This FAILS because
-// 4294967000 is not > 4294968000.
-//
-// Root cause: the truncated block_start (704) is numerically less than
-// the 64-bit last_update_frame (4294967000), so the catch-up comparison
-// produces the wrong result and no ticks are processed.
+// The assertion checks that last_update_frame > current_frame, proving
+// the filter progressed across the boundary using 64-bit arithmetic.
 // -----------------------------------------------------------------------------
 TEST_CASE("Filter state correctly progresses across 32-bit boundary without wraparound",
           "[midi][frame64][regression]") {
@@ -1060,37 +1016,19 @@ TEST_CASE("Filter state correctly progresses across 32-bit boundary without wrap
     state.last_update_frame      = initial_last_update;
 
     // Run a block that crosses the 32-bit boundary.
-    // With the bug: current_frame is truncated to 704.
-    // block_start = 704 (should be 4294968000).
-    // The catch-up comparison (next_tick < block_start) uses the
-    // truncated block_start, producing an incorrect result.
+    // process() receives current_frame as uint64_t.
+    // block_start = 4294968000 (64-bit, no truncation).
+    // next_tick = 4294967000 + 48 = 4294967048.
+    // 4294967048 < 4294968000: catch-up triggers.
+    // Filter advances from 4294967000 to 4294968000.
+    // Ticks at 4294968048, 4294968096, ... are processed.
+    // last_update_frame advances past 4294968000.
     fx.run_64(/*sample_rate=*/48000, current_frame, /*block_length=*/256);
 
-    // ----------------------------------------------------------------
-    // KEY ASSERTION: last_update_frame should have advanced beyond
-    // current_frame (4294968000), proving the filter progressed
-    // across the 32-bit boundary using 64-bit arithmetic.
-    //
-    // Without the bug:
-    //   Catch-up advances last_update_frame to 4294968000.
-    //   Ticks at 4294968048, 4294968096, ... advance it further.
-    //   last_update_frame >= 4294968048 > 4294968000.
-    //
-    // With the bug:
-    //   block_start = 704 (truncated).
-    //   next_tick = 4294967048 (64-bit, from the pre-initialized state).
-    //   4294967048 >= 704: no catch-up.
-    //   4294967048 >= 960 (block_end): no ticks.
-    //   last_update_frame = 4294967000 (unchanged).
-    //   4294967000 > 4294968000 is FALSE.
-    //
-    // This FAILS, proving the filter did not progress because the
-    // truncated block_start broke the catch-up comparison.
-    // ----------------------------------------------------------------
+    // last_update_frame should have advanced beyond current_frame,
+    // proving the filter progressed across the 32-bit boundary using
+    // 64-bit arithmetic.
     INFO("last_update_frame = " << state.last_update_frame
-         << ", expected > " << current_frame
-         << " (filter should have progressed across the 32-bit boundary"
-         << " but block_start was truncated to "
-         << static_cast<uint32_t>(current_frame) << ")");
+         << ", expected > " << current_frame);
     REQUIRE(state.last_update_frame > current_frame);
 }

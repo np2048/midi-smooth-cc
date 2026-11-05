@@ -9,6 +9,13 @@
 //   3. emit_output_events_until() - incremental output generation loop.
 //   4. append_cc_event()          - construct + emit a 3-byte CC event.
 //   5. append_passthrough_event() - copy an existing event unchanged.
+//
+// 64-BIT FRAME TIMESTAMP HANDLING:
+//   process() accepts current_frame as uint64_t. All internal absolute
+//   frame calculations (block_start, block_end, deadline_frame, next_tick)
+//   use uint64_t. This prevents wraparound at UINT32_MAX (~24.9 hours
+//   at 48 kHz). Block-relative offsets (ev->time.frames, frame_offset)
+//   remain uint32_t per the LV2 specification.
 // =============================================================================
 #include "midi_processor.hpp"
 
@@ -19,37 +26,21 @@ namespace midi_smooth_cc {
 
 // =============================================================================
 // 1. process()
-//
-// CHRONOLOGICAL INTERLEAVING:
-//
-// The input sequence is iterated in order (the host guarantees it is sorted
-// by timestamp). Before appending each passthrough event, we flush any
-// generated CC events whose frame_offset is strictly less than the
-// passthrough event's frame_offset. This ensures the output sequence is
-// strictly ordered by frame_offset (non-decreasing), as required by the
-// LV2 specification.
-//
-// OVERFLOW-SAFE STATE MANAGEMENT:
-//
-// emit_output_events_until() uses the compute/commit pattern: the filter's
-// next value is COMPUTED without mutating internal state, the event is
-// appended, and ONLY if the append succeeds is the filter state COMMITTED.
-// This guarantees that a failed append never advances the filter past the
-// lost value, allowing it to be retried on the next block.
 // =============================================================================
 void MidiProcessor::process(const LV2_Atom_Sequence* input,
                             LV2_Atom_Sequence* output,
                             uint32_t sample_rate,
-                            uint32_t current_frame,
+                            uint64_t current_frame,
                             uint32_t block_length,
                             const PluginParameters& params,
                             std::array<FilterState, 2048>& states) {
     // Step 1: clear the output sequence for this block.
     lv2_atom_sequence_clear(output);
 
-    const uint64_t block_start = static_cast<uint64_t>(current_frame);
-    const uint64_t block_end   =
-        block_start + static_cast<uint64_t>(block_length);
+    // block_start and block_end are uint64_t to support frame positions
+    // beyond UINT32_MAX. current_frame is already uint64_t (no cast needed).
+    const uint64_t block_start = current_frame;
+    const uint64_t block_end   = block_start + static_cast<uint64_t>(block_length);
 
     // Step 2: iterate the input sequence.
     LV2_Atom_Event* ev     = lv2_atom_sequence_begin(&input->body);
@@ -68,6 +59,9 @@ void MidiProcessor::process(const LV2_Atom_Sequence* input,
     // appending each passthrough event, flush any generated CC events
     // that are scheduled at a strictly earlier frame_offset.
     while (ev != ev_end) {
+        // ev->time.frames is uint32_t (block-relative offset, per LV2 spec).
+        // Compute the absolute deadline as uint64_t to preserve the full
+        // frame position across the 32-bit boundary.
         const uint64_t ev_absolute =
             block_start + static_cast<uint64_t>(ev->time.frames);
         const uint64_t deadline =
@@ -95,7 +89,8 @@ void MidiProcessor::process(const LV2_Atom_Sequence* input,
 
                 if (ch_sel && cc_sel) {
                     // Selected CC: route into the filter state, do NOT pass
-                    // through. The output loop will emit smoothed values.
+                    // through. Pass current_frame as uint64_t to preserve
+                    // the full absolute frame position.
                     FilterState& state =
                         states[static_cast<size_t>(channel) * 128u + cc_num];
                     handle_selected_cc(value, ev->time.frames,
@@ -124,10 +119,15 @@ void MidiProcessor::process(const LV2_Atom_Sequence* input,
 
 // =============================================================================
 // 2. handle_selected_cc()
+//
+// current_frame is uint64_t to preserve the full absolute frame position.
+// event_frame_offset is uint32_t (block-relative, from ev->time.frames).
+// The sum current_frame + event_frame_offset is computed in uint64_t,
+// preventing truncation when current_frame > UINT32_MAX.
 // =============================================================================
 void MidiProcessor::handle_selected_cc(uint8_t value,
                                        uint32_t event_frame_offset,
-                                       uint32_t current_frame,
+                                       uint64_t current_frame,
                                        const PluginParameters& params,
                                        FilterState& state) {
     const double value_d = static_cast<double>(value);
@@ -139,8 +139,8 @@ void MidiProcessor::handle_selected_cc(uint8_t value,
 
         state.is_initialized         = true;
         state.last_transmitted_value = -1;
-        state.last_update_frame      =
-            static_cast<uint64_t>(current_frame) + event_frame_offset;
+        // uint64_t + uint32_t promotes to uint64_t. No truncation.
+        state.last_update_frame      = current_frame + event_frame_offset;
         return;
     }
 
@@ -158,8 +158,6 @@ void MidiProcessor::handle_selected_cc(uint8_t value,
     }
 
     // Update target on BOTH smoothers via process() with dt=0.
-    // process() with dt=0 updates target_value_ without advancing
-    // current_value_ (alpha = 0 for exp, max_delta = 0 for slew).
     const double tau_attack  = static_cast<double>(params.attack_ms)  / 1000.0;
     const double tau_release = static_cast<double>(params.release_ms) / 1000.0;
     const double rising      = static_cast<double>(params.rising_rate);
@@ -172,27 +170,16 @@ void MidiProcessor::handle_selected_cc(uint8_t value,
 // =============================================================================
 // 3. emit_output_events_until()
 //
+// All absolute frame positions (block_start, deadline_frame, next_tick,
+// state.last_update_frame) are uint64_t. This ensures correct catch-up
+// and tick scheduling across the 32-bit boundary.
+//
 // OVERFLOW-SAFE COMPUTE/COMMIT PATTERN:
-//
-// For each tick, the filter's next value is COMPUTED without mutating
-// internal state (compute() is a const method). The event is then
-// appended to the output buffer. ONLY if the append succeeds are the
-// filter state (current_value, target_value) and last_update_frame
-// committed. If the append fails (buffer full), the function returns
-// immediately WITHOUT advancing any state. On the next block, the
-// filter resumes from the same last_update_frame, and the lost tick
-// is retried with the same value.
-//
-// This guarantees:
-//   - last_update_frame is ONLY advanced after a successful append.
-//   - current_value is ONLY advanced after a successful append.
-//   - last_transmitted_value is ONLY updated after a successful append.
-//   - No computed value is permanently lost due to buffer overflow.
-//
-// Real-time safety: compute() is a const leaf function (no allocation,
-// no locks). The computed double is stored on the stack. commit() is a
-// trivial setter. No dynamic allocation or unpredictable execution time
-// is introduced.
+//   For each tick, the filter's next value is COMPUTED without mutating
+//   internal state. The event is appended. ONLY if the append succeeds
+//   is the filter state COMMITTED. If the append fails, the function
+//   returns without advancing any state, allowing the tick to be retried
+//   on the next block.
 // =============================================================================
 void MidiProcessor::emit_output_events_until(LV2_Atom_Sequence* output,
                                              uint32_t sample_rate,
@@ -213,7 +200,6 @@ void MidiProcessor::emit_output_events_until(LV2_Atom_Sequence* output,
         return;
     }
 
-    // Pre-compute smoother parameters outside the per-state loop.
     const double tau_attack  = static_cast<double>(params.attack_ms)  / 1000.0;
     const double tau_release = static_cast<double>(params.release_ms) / 1000.0;
     const double rising      = static_cast<double>(params.rising_rate);
@@ -237,17 +223,15 @@ void MidiProcessor::emit_output_events_until(LV2_Atom_Sequence* output,
                 continue;
             }
 
+            // next_tick is uint64_t. state.last_update_frame is uint64_t.
+            // frames_per_tick is uint32_t. The addition promotes to
+            // uint64_t, preventing truncation.
             uint64_t next_tick = state.last_update_frame + frames_per_tick;
 
             // Catch-up: if we've fallen behind the block start, advance
-            // the filter in one capped step to block_start. This is a
-            // non-emit step (the tick is in the past), so it uses process()
-            // directly. If this block's output buffer overflows later,
-            // the catch-up has already been committed and will not be
-            // redone. This is acceptable because the catch-up does not
-            // produce an output event -- it merely brings the filter's
-            // current_value to the block start for correct subsequent
-            // tick computation.
+            // the filter in one capped step to block_start. Both
+            // next_tick and block_start are uint64_t, so the comparison
+            // is correct even when current_frame > UINT32_MAX.
             if (next_tick < block_start) {
                 const double dt_catchup =
                     static_cast<double>(block_start - state.last_update_frame) /
@@ -273,19 +257,13 @@ void MidiProcessor::emit_output_events_until(LV2_Atom_Sequence* output,
             }
 
             // Process every output tick that falls within
-            // [block_start, deadline_frame).
+            // [block_start, deadline_frame). Both are uint64_t.
             while (next_tick < deadline_frame) {
                 const double dt =
                     static_cast<double>(next_tick - state.last_update_frame) /
                     static_cast<double>(sample_rate);
 
-                // -------------------------------------------------------
-                // OVERFLOW-SAFE COMPUTE PHASE:
-                // Compute the new filtered value WITHOUT mutating the
-                // smoother's internal state. compute() is a const method
-                // that reads current_value_ and target_value_ and returns
-                // what the new value WOULD be.
-                // -------------------------------------------------------
+                // COMPUTE phase: calculate the new value without mutating state.
                 double smoothed;
                 if (params.smoothing_mode == SmoothingMode::Exponential) {
                     const double target = state.exp_smoother.target_value();
@@ -310,37 +288,24 @@ void MidiProcessor::emit_output_events_until(LV2_Atom_Sequence* output,
 
                 // Only emit if the integer value changed (spec §8).
                 if (int_val != state.last_transmitted_value) {
+                    // frame_offset is uint32_t (block-relative, per LV2 spec).
+                    // next_tick - block_start is uint64_t, but the result
+                    // is always < block_length (which is uint32_t), so the
+                    // cast to uint32_t is safe.
                     const uint32_t frame_offset =
                         static_cast<uint32_t>(next_tick - block_start);
 
-                    // ---------------------------------------------------
-                    // APPEND ATTEMPT:
-                    // Try to write the event to the output buffer. If
-                    // this fails (buffer full), return immediately
-                    // WITHOUT committing the filter state. The tick
-                    // will be retried on the next block.
-                    // ---------------------------------------------------
+                    // APPEND ATTEMPT: if this fails, return without
+                    // committing state.
                     if (!append_cc_event(output,
                                          static_cast<uint8_t>(ch),
                                          static_cast<uint8_t>(cc),
                                          static_cast<uint8_t>(int_val),
                                          frame_offset)) {
-                        // Buffer full (spec §11): stop emitting.
-                        // DO NOT commit state. The filter's current_value,
-                        // target_value, and last_update_frame remain at
-                        // their pre-tick values. On the next block,
-                        // emit_output_events_until will recompute this
-                        // tick from the same last_update_frame and
-                        // retry the append.
                         return;
                     }
 
-                    // ---------------------------------------------------
-                    // COMMIT PHASE (only reached on successful append):
-                    // Now it is safe to advance the filter state.
-                    // commit() updates target_value_ and current_value_
-                    // to the computed values.
-                    // ---------------------------------------------------
+                    // COMMIT phase: only reached on successful append.
                     if (params.smoothing_mode == SmoothingMode::Exponential) {
                         const double target = state.exp_smoother.target_value();
                         state.exp_smoother.commit(target, smoothed);
@@ -351,10 +316,7 @@ void MidiProcessor::emit_output_events_until(LV2_Atom_Sequence* output,
 
                     state.last_transmitted_value = int_val;
                 } else {
-                    // Value unchanged: no event emitted, but the filter
-                    // still needs to advance. This is safe because no
-                    // output event was needed -- the value hasn't changed
-                    // so there's nothing to "lose" on overflow.
+                    // Value unchanged: no event emitted, but advance the filter.
                     if (params.smoothing_mode == SmoothingMode::Exponential) {
                         const double target = state.exp_smoother.target_value();
                         state.exp_smoother.commit(target, smoothed);
@@ -364,9 +326,7 @@ void MidiProcessor::emit_output_events_until(LV2_Atom_Sequence* output,
                     }
                 }
 
-                // last_update_frame is ONLY updated after the tick has
-                // been fully processed (either emitted successfully, or
-                // skipped because the value was unchanged).
+                // last_update_frame is uint64_t. next_tick is uint64_t.
                 state.last_update_frame = next_tick;
 
                 next_tick += frames_per_tick;
