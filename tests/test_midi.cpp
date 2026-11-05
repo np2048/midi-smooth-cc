@@ -27,6 +27,16 @@
 //         relative to passthrough events.
 //     C2: Multiple events with the same timestamp are handled
 //         deterministically.
+//
+//   Output overflow regression tests (marked [midi][overflow]):
+//     O1: Passthrough exhaustion drops excess events gracefully.
+//     O2: Generated event exhaustion does not advance filter state past
+//         the failed tick (FAILS — reveals premature last_update_frame
+//         update before append).
+//     O3: Mixed exhaustion preserves chronological order and structural
+//         validity up to the point of exhaustion.
+//     O4: Recovery after exhaustion — two-block test verifying
+//         last_update_frame consistency (FAILS — same root cause as O2).
 // =============================================================================
 #include <catch2/catch_test_macros.hpp>
 
@@ -581,78 +591,32 @@ TEST_CASE("Regression: Full integration processing cycle — end-to-end smoke te
 
 // =============================================================================
 // Chronological ordering regression tests
-//
-// These tests verify that generated CC events and passthrough events are
-// interleaved in strict chronological order by frame_offset in the output
-// LV2_Atom_Sequence. The LV2 specification requires Atom Sequences to be
-// ordered by timestamp; strict hosts (like Carla) may reject or silently
-// drop out-of-order sequences.
-//
-// Suspected defect: midi_processor.cpp runs emit_output_events() AFTER the
-// passthrough loop, so generated events are always appended at the END of
-// the output sequence regardless of their frame_offset. If a generated CC
-// event has an earlier frame_offset than a passthrough event, the output
-// sequence violates the chronological ordering requirement.
 // =============================================================================
 
 TEST_CASE("Generated events are emitted in strict chronological order relative to passthrough events",
           "[midi][chronological]") {
     MidiProcessorFixture fx;
 
-    // High output rate so generated CC events have predictable frame offsets.
-    // frames_per_tick = 48000 / 1000 = 48.
     fx.params().output_rate_hz = 1000;
 
-    // Pre-initialize the CC7 filter state so output generation produces a
-    // CC event at frame_offset 0 of the current block.
-    //
-    // last_update_frame = 952, frames_per_tick = 48
-    //   -> first tick at absolute frame 952 + 48 = 1000
-    //   -> with current_frame = 1000, frame_offset = 1000 - 1000 = 0
-    //
-    // The generated CC at frame_offset 0 is EARLIER than the Note On
-    // passthrough event at frame_offset 10. In a correctly ordered output
-    // sequence, the CC must appear BEFORE the Note On.
     FilterState& state = fx.states()[0 * 128 + 7];
     state.is_initialized = true;
     state.exp_smoother.reset(0.0);
     state.slew_limiter.reset(0.0);
-    // Set initial target to 100 (current stays 0 due to dt=0 trick).
     state.exp_smoother.process(100.0, 0.0, 0.05, 0.1);
     state.slew_limiter.process(100.0, 0.0, 10000.0, 10000.0);
-    state.last_transmitted_value = 0;   // force emit on first tick (0 != filtered value)
-    state.last_update_frame      = 952; // first tick lands at absolute frame 1000
+    state.last_transmitted_value = 0;
+    state.last_update_frame      = 952;
 
-    // Inject a Note On at frame_offset 10 (passthrough — will be appended
-    // during the input loop, BEFORE emit_output_events runs).
     fx.add_midi_event(10, {0x90, 60, 100});
-
-    // Inject a CC7 at frame_offset 20 (consumed — updates the target but
-    // does NOT change last_update_frame since the state is already
-    // initialized).
     fx.add_midi_event(20, {0xB0, 7, 50});
 
-    // Run with current_frame = 1000 so the first output tick falls at
-    // frame_offset 0 (earlier than the Note On at frame_offset 10).
     fx.run(/*sample_rate=*/48000, /*current_frame=*/1000, /*block_length=*/256);
 
     const auto events = fx.get_output_events();
 
-    // The output must NOT be empty — both the Note On and the generated CC
-    // should be present.
     REQUIRE_FALSE(events.empty());
 
-    // ---------------------------------------------------------------
-    // Assertion 1: All output events must be sorted by frame_offset in
-    // non-decreasing order (LV2 Atom Sequence requirement).
-    //
-    // This FAILS with the current implementation because:
-    //   - The Note On (frame_offset 10) is appended during the input loop.
-    //   - The generated CC (frame_offset 0) is appended during
-    //     emit_output_events, AFTER the input loop.
-    //   - Output order: [Note On (10), CC (0), ...]
-    //   - 10 > 0 violates non-decreasing order.
-    // ---------------------------------------------------------------
     for (size_t i = 1; i < events.size(); ++i) {
         INFO("Event " << i << " frame_offset=" << events[i].frame_offset
              << " follows event " << (i - 1)
@@ -661,28 +625,16 @@ TEST_CASE("Generated events are emitted in strict chronological order relative t
         REQUIRE(events[i].frame_offset >= events[i - 1].frame_offset);
     }
 
-    // ---------------------------------------------------------------
-    // Assertion 2: The generated CC (frame_offset 0) must appear BEFORE
-    // the Note On (frame_offset 10) in the output vector.
-    //
-    // This FAILS with the current implementation because the CC is
-    // appended after the Note On (emit_output_events runs after the
-    // passthrough loop), so the CC's index in the vector is HIGHER than
-    // the Note On's index despite having a LOWER frame_offset.
-    // ---------------------------------------------------------------
-    size_t cc_index      = events.size();  // sentinel: "not found"
+    size_t cc_index      = events.size();
     size_t note_on_index = events.size();
 
     for (size_t i = 0; i < events.size(); ++i) {
-        // Identify the generated CC: status 0xB0, CC number 7.
-        // The first such event is the generated one (frame_offset 0).
         if (cc_index == events.size() &&
             events[i].bytes.size() == 3 &&
             events[i].bytes[0] == 0xB0 &&
             events[i].bytes[1] == 7) {
             cc_index = i;
         }
-        // Identify the Note On: status 0x90.
         if (events[i].bytes.size() == 3 &&
             events[i].bytes[0] == 0x90) {
             note_on_index = i;
@@ -693,13 +645,9 @@ TEST_CASE("Generated events are emitted in strict chronological order relative t
     REQUIRE(cc_index      < events.size());
     REQUIRE(note_on_index < events.size());
 
-    // Verify the frame_offsets are as expected, confirming the test setup
-    // is correct (CC at 0, Note On at 10).
     REQUIRE(events[cc_index].frame_offset      == 0u);
     REQUIRE(events[note_on_index].frame_offset == 10u);
 
-    // THE KEY ASSERTION: CC (frame 0) must appear before Note On (frame 10)
-    // in the output vector. This proves chronological interleaving.
     INFO("Generated CC at index " << cc_index
          << " (frame_offset=" << events[cc_index].frame_offset
          << "), Note On at index " << note_on_index
@@ -714,13 +662,6 @@ TEST_CASE("Multiple events with the same timestamp are handled deterministically
 
     fx.params().output_rate_hz = 1000;
 
-    // Pre-initialize the CC7 filter state so the first generated CC falls
-    // at frame_offset 10 — the SAME frame_offset as the Note On and CC7
-    // input events.
-    //
-    // last_update_frame = 962, frames_per_tick = 48
-    //   -> first tick at absolute frame 962 + 48 = 1010
-    //   -> with current_frame = 1000, frame_offset = 1010 - 1000 = 10
     FilterState& state = fx.states()[0 * 128 + 7];
     state.is_initialized = true;
     state.exp_smoother.reset(0.0);
@@ -728,34 +669,17 @@ TEST_CASE("Multiple events with the same timestamp are handled deterministically
     state.exp_smoother.process(100.0, 0.0, 0.05, 0.1);
     state.slew_limiter.process(100.0, 0.0, 10000.0, 10000.0);
     state.last_transmitted_value = 0;
-    state.last_update_frame      = 962;  // first tick at frame_offset 10
+    state.last_update_frame      = 962;
 
-    // Inject a Note On AND a CC7 at the EXACT SAME frame_offset (10).
-    // Both input events share timestamp 10.
-    fx.add_midi_event(10, {0x90, 60, 100});  // Note On (passthrough)
-    fx.add_midi_event(10, {0xB0, 7, 50});    // CC7 (consumed)
+    fx.add_midi_event(10, {0x90, 60, 100});
+    fx.add_midi_event(10, {0xB0, 7, 50});
 
     fx.run(/*sample_rate=*/48000, /*current_frame=*/1000, /*block_length=*/256);
 
     const auto events = fx.get_output_events();
 
-    // Must not crash and must produce output.
     REQUIRE_FALSE(events.empty());
 
-    // The output must be sorted by frame_offset in non-decreasing order.
-    // Events with the same timestamp (frame_offset) may appear in any
-    // relative order — the LV2 spec allows equal timestamps.
-    //
-    // With the current implementation:
-    //   - Note On (10) is appended during the input loop.
-    //   - Generated CC (10) is appended during emit_output_events.
-    //   - Output: [Note On (10), CC (10), CC (58), ...]
-    //   - 10 >= 10 is satisfied (non-decreasing), so this assertion PASSES
-    //     even with the current buggy implementation.
-    //
-    // This test guards against future regressions where same-timestamp
-    // handling might break (e.g., crash, corruption, or inverted order
-    // that violates non-decreasing).
     for (size_t i = 1; i < events.size(); ++i) {
         INFO("Event " << i << " frame_offset=" << events[i].frame_offset
              << " follows event " << (i - 1)
@@ -763,10 +687,8 @@ TEST_CASE("Multiple events with the same timestamp are handled deterministically
         REQUIRE(events[i].frame_offset >= events[i - 1].frame_offset);
     }
 
-    // Verify the output sequence is structurally valid.
     REQUIRE(fx.output_is_valid());
 
-    // Verify that at least one Note On and one CC7 are present.
     bool found_note_on = false;
     bool found_cc7     = false;
     for (const auto& ev : events) {
@@ -779,4 +701,358 @@ TEST_CASE("Multiple events with the same timestamp are handled deterministically
     }
     REQUIRE(found_note_on);
     REQUIRE(found_cc7);
+}
+
+// =============================================================================
+// Output overflow regression tests (spec §11)
+//
+// These tests verify that the plugin handles output buffer exhaustion safely.
+// The current implementation has two suspected defects:
+//
+// 1. PASSTHROUGH SILENT DROP: In process(), the return value of
+//    append_passthrough_event is cast to (void), meaning passthrough
+//    append failures are silently ignored. Events vanish without trace.
+//
+// 2. PREMATURE last_update_frame UPDATE: In emit_output_events_until(),
+//    state.last_update_frame is updated to next_tick BEFORE the
+//    append_cc_event attempt. If the append fails, the tick is considered
+//    "processed" and the value is permanently lost. The filter state
+//    (current_value and last_update_frame) advances past the failed tick,
+//    creating an inconsistency between the filter's internal state and the
+//    actual output. On the next block, the filter resumes from the
+//    advanced position, and the skipped value is never emitted.
+//
+// Test O1 verifies graceful passthrough exhaustion handling (guard test).
+// Test O2 reveals the premature last_update_frame update (FAILS).
+// Test O3 verifies mixed exhaustion preserves ordering (guard test).
+// Test O4 reveals the filter state inconsistency after recovery (FAILS).
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// O1: Passthrough Exhaustion
+//
+// A small output capacity (32) holds exactly one padded MIDI event.
+// Two Note On events are injected. The first fits; the second is dropped.
+// The test verifies the output remains structurally valid and iterable.
+//
+// This test PASSES with the current implementation because
+// lv2_atom_sequence_append_event internally checks capacity and returns
+// NULL when full. The (void) cast means the drop is silent, but the
+// output is not corrupted.
+// -----------------------------------------------------------------------------
+TEST_CASE("Overflow O1: passthrough exhaustion drops excess events gracefully",
+          "[midi][overflow]") {
+    // Capacity = 32. One padded MIDI event = 16 bytes.
+    // sizeof(LV2_Atom_Sequence_Body) varies (4/8/16).
+    // After 1 event: atom.size = sizeof_body + 16.
+    // Remaining: 32 - (sizeof_body + 16) < 16 for any sizeof_body.
+    // Second event is rejected by lv2_atom_sequence_append_event.
+    MidiProcessorFixture fx(/*output_capacity=*/32);
+
+    fx.add_midi_event(10, {0x90, 60, 100});
+    fx.add_midi_event(20, {0x90, 64, 80});
+
+    fx.run(/*sample_rate=*/48000, /*current_frame=*/0, /*block_length=*/256);
+
+    const auto events = fx.get_output_events();
+
+    // The first Note On must be present.
+    REQUIRE_FALSE(events.empty());
+    REQUIRE(events.size() >= 1);
+
+    // Verify the first event is the Note On at frame 10.
+    REQUIRE(events[0].frame_offset == 10u);
+    REQUIRE(events[0].bytes[0] == 0x90);
+    REQUIRE(events[0].bytes[1] == 60);
+    REQUIRE(events[0].bytes[2] == 100);
+
+    // atom.size must not exceed the capacity.
+    REQUIRE(fx.output()->atom.size <= 32u);
+
+    // The output must be structurally valid (iterable without crash).
+    // get_output_events() already iterated the sequence; reaching this
+    // assertion means the structure is valid.
+    REQUIRE(fx.output_is_valid());
+}
+
+// -----------------------------------------------------------------------------
+// O2: Generated Event Exhaustion — premature last_update_frame update
+//
+// A pre-initialized slew limiter state generates CC events at 1000 Hz
+// (frames_per_tick = 48). The output capacity (32) holds exactly one
+// event. The block has 5 ticks (at frames 48, 96, 144, 192, 240).
+//
+// Tick at 48: value 10. Emitted. atom.size = sizeof_body + 16.
+// Tick at 96: value 20. append fails (buffer full). BUT
+//   state.last_update_frame was already set to 96 BEFORE the append
+//   attempt. The filter's current_value was advanced to 20.
+//
+// After the block:
+//   BUGGY:   last_update_frame = 96, current_value = 20
+//   CORRECT: last_update_frame = 48, current_value = 10
+//
+// The assertions check that last_update_frame and current_value reflect
+// only the last SUCCESSFULLY emitted tick, not the failed one. These
+// assertions FAIL with the current implementation.
+// -----------------------------------------------------------------------------
+TEST_CASE("Overflow O2: generated event exhaustion does not advance filter state past failed tick",
+          "[midi][overflow][regression]") {
+    MidiProcessorFixture fx(/*output_capacity=*/32);
+
+    fx.params().output_rate_hz = 1000;   // frames_per_tick = 48
+    fx.params().smoothing_mode = SmoothingMode::Slew;
+    fx.params().rising_rate    = 10000;  // 10 CC per tick (dt = 0.001s)
+    fx.params().falling_rate   = 10000;
+
+    FilterState& state = fx.states()[0 * 128 + 7];
+    state.is_initialized = true;
+    state.exp_smoother.reset(0.0);
+    state.slew_limiter.reset(0.0);
+    state.exp_smoother.process(100.0, 0.0, 0.05, 0.1);
+    state.slew_limiter.process(100.0, 0.0, 10000.0, 10000.0);
+    state.last_transmitted_value = 0;
+    state.last_update_frame      = 0;
+
+    // Block: 256 frames. Ticks at 48, 96, 144, 192, 240.
+    // Tick 48: slew 0 + 10 = 10. Emitted (first event fits in capacity 32).
+    // Tick 96: slew 10 + 10 = 20. Append FAILS (buffer full).
+    //   BUG: last_update_frame set to 96 BEFORE append.
+    //   current_value advanced to 20.
+    //   last_transmitted stays at 10.
+    //   emit_output_events_until returns immediately.
+    // Ticks 144, 192, 240: never processed.
+    fx.run(/*sample_rate=*/48000, /*current_frame=*/0, /*block_length=*/256);
+
+    const auto events = fx.get_output_events();
+
+    // Only 1 event should be in the output (the first tick).
+    REQUIRE(events.size() == 1);
+    REQUIRE(events[0].frame_offset == 48u);
+    REQUIRE(events[0].bytes[2] == 10);
+
+    // last_transmitted_value should be 10 (the last emitted value).
+    // This PASSES — last_transmitted is only updated on successful append.
+    REQUIRE(state.last_transmitted_value == 10);
+
+    // -------------------------------------------------------------------
+    // KEY ASSERTION 1: last_update_frame should be at the last
+    // SUCCESSFULLY emitted tick (48), not at the FAILED tick (96).
+    //
+    // BUG: state.last_update_frame is set to next_tick (96) BEFORE
+    // append_cc_event is called. When the append fails, the function
+    // returns, but last_update_frame remains at 96. The tick is
+    // considered "processed" even though no event was emitted.
+    //
+    // This assertion FAILS: 96 != 48.
+    // -------------------------------------------------------------------
+    REQUIRE(state.last_update_frame == 48u);
+
+    // -------------------------------------------------------------------
+    // KEY ASSERTION 2: The filter's current_value should reflect only
+    // the successfully emitted tick (value 10), not the failed tick
+    // (value 20).
+    //
+    // BUG: slew_limiter.process() was called for tick 96 BEFORE the
+    // append attempt, advancing current_value to 20. Even though the
+    // event was not emitted, the filter state has moved past the value.
+    //
+    // This assertion FAILS: current_value is 20, not 10.
+    // -------------------------------------------------------------------
+    const double current = state.slew_limiter.current_value();
+    INFO("slew_limiter.current_value() = " << current
+         << ", expected ~10.0 (last emitted tick), but the filter was"
+         << " advanced to ~20.0 (the failed tick) because process() was"
+         << " called before append_cc_event failed");
+    REQUIRE(current < 15.0);  // 10.0 < 15.0 (PASS), 20.0 < 15.0 (FAIL)
+}
+
+// -----------------------------------------------------------------------------
+// O3: Mixed Exhaustion — chronological order preserved until exhaustion
+//
+// A Note On (passthrough) at frame_offset 10 fills the small buffer.
+// A pre-initialized CC7 state generates a tick at frame_offset 38.
+// The CC tick's append fails because the buffer is full from the Note On.
+//
+// The test verifies:
+//   - The output contains only the Note On (CC tick dropped).
+//   - The output is chronologically sorted (trivially, 1 event).
+//   - atom.size does not exceed capacity.
+//   - The output sequence is iterable (structurally valid).
+//
+// This test PASSES with the current implementation — the interleaving
+// logic and append_event's capacity check work correctly even during
+// overflow.
+// -----------------------------------------------------------------------------
+TEST_CASE("Overflow O3: mixed passthrough and generated events preserve order until exhaustion",
+          "[midi][overflow]") {
+    MidiProcessorFixture fx(/*output_capacity=*/32);
+
+    fx.params().output_rate_hz = 1000;   // frames_per_tick = 48
+    fx.params().smoothing_mode = SmoothingMode::Slew;
+    fx.params().rising_rate    = 10000;
+    fx.params().falling_rate   = 10000;
+
+    // Pre-initialize CC7: first tick at frame_offset 38.
+    // last_update_frame = 962, frames_per_tick = 48.
+    // next_tick = 962 + 48 = 1010. With current_frame = 1000,
+    // frame_offset = 1010 - 1000 = 10... wait, that's the same as
+    // the Note On. Let me use last_update_frame = 990 instead.
+    // next_tick = 990 + 48 = 1038. frame_offset = 1038 - 1000 = 38.
+    FilterState& state = fx.states()[0 * 128 + 7];
+    state.is_initialized = true;
+    state.exp_smoother.reset(0.0);
+    state.slew_limiter.reset(0.0);
+    state.exp_smoother.process(100.0, 0.0, 0.05, 0.1);
+    state.slew_limiter.process(100.0, 0.0, 10000.0, 10000.0);
+    state.last_transmitted_value = 0;
+    state.last_update_frame      = 990;  // first tick at frame_offset 38
+
+    // Note On at frame_offset 10 (passthrough, fills the buffer).
+    fx.add_midi_event(10, {0x90, 60, 100});
+
+    // Run with current_frame=1000, block_length=256.
+    // Interleaving:
+    //   1. Before Note On (10): emit_output_events_until(deadline=1010).
+    //      next_tick = 1038. 1038 >= 1010. No ticks emitted.
+    //   2. Note On (10): append. atom.size = sizeof_body + 16.
+    //   3. After input: emit_output_events_until(deadline=1256).
+    //      next_tick = 1038. 1038 < 1256. Process tick.
+    //      Filter advanced. last_update_frame = 1038.
+    //      Value computed. Try to emit.
+    //      Capacity check: 32 - (sizeof_body + 16) < 16. REJECTED.
+    //      Return immediately.
+    fx.run(/*sample_rate=*/48000, /*current_frame=*/1000, /*block_length=*/256);
+
+    const auto events = fx.get_output_events();
+
+    // Only the Note On should be in the output (CC tick dropped).
+    REQUIRE(events.size() == 1);
+    REQUIRE(events[0].frame_offset == 10u);
+    REQUIRE(events[0].bytes[0] == 0x90);
+    REQUIRE(events[0].bytes[1] == 60);
+    REQUIRE(events[0].bytes[2] == 100);
+
+    // The output must be chronologically sorted (trivially, 1 event).
+    for (size_t i = 1; i < events.size(); ++i) {
+        REQUIRE(events[i].frame_offset >= events[i - 1].frame_offset);
+    }
+
+    // atom.size must not exceed capacity.
+    REQUIRE(fx.output()->atom.size <= 32u);
+
+    // The output must be structurally valid.
+    REQUIRE(fx.output_is_valid());
+}
+
+// -----------------------------------------------------------------------------
+// O4: Recovery after exhaustion — two-block test
+//
+// Block 1: small capacity (32), pre-initialized slew state.
+//   Tick at 48: value 10. Emitted.
+//   Tick at 96: value 20. Append fails. last_update_frame = 96 (BUG).
+//   After block 1: last_update_frame = 96, current_value = 20.
+//
+// Block 2: large capacity (1024), no input.
+//   next_tick = 96 + 48 = 144. 144 < 256 (block_start). Catch-up.
+//   The filter catches up from 96 to 256, advancing current_value.
+//   Ticks within block 2 are emitted normally.
+//
+// The test verifies:
+//   - Block 1 produces exactly 1 event (the first tick).
+//   - After block 1, last_update_frame should be 48 (FAILS: 96).
+//   - Block 2 produces events (recovery works, but the value 20 was lost).
+//
+// The last_update_frame assertion after block 1 FAILS with the current
+// implementation, demonstrating the same root cause as O2: the filter
+// state is advanced past the failed tick.
+// -----------------------------------------------------------------------------
+TEST_CASE("Overflow O4: recovery after exhaustion resumes in next block without permanent state corruption",
+          "[midi][overflow][regression]") {
+    // Start with small capacity for block 1.
+    MidiProcessorFixture fx(/*output_capacity=*/32);
+
+    fx.params().output_rate_hz = 1000;
+    fx.params().smoothing_mode = SmoothingMode::Slew;
+    fx.params().rising_rate    = 10000;
+    fx.params().falling_rate   = 10000;
+
+    FilterState& state = fx.states()[0 * 128 + 7];
+    state.is_initialized = true;
+    state.exp_smoother.reset(0.0);
+    state.slew_limiter.reset(0.0);
+    state.exp_smoother.process(100.0, 0.0, 0.05, 0.1);
+    state.slew_limiter.process(100.0, 0.0, 10000.0, 10000.0);
+    state.last_transmitted_value = 0;
+    state.last_update_frame      = 0;
+
+    // ---- Block 1: current_frame=0, block_length=256 ----
+    // Tick at 48: value 10. Emitted (capacity allows 1 event).
+    // Tick at 96: value 20. Append FAILS.
+    //   BUG: last_update_frame = 96 (set before append).
+    //   current_value = 20 (filter advanced).
+    //   last_transmitted = 10 (not updated on failure).
+    fx.run(/*sample_rate=*/48000, /*current_frame=*/0, /*block_length=*/256);
+
+    const auto events_b1 = fx.get_output_events();
+
+    // Block 1 should have exactly 1 event.
+    REQUIRE(events_b1.size() == 1);
+    REQUIRE(events_b1[0].frame_offset == 48u);
+    REQUIRE(events_b1[0].bytes[2] == 10);
+
+    // last_transmitted should be 10 (the emitted value).
+    REQUIRE(state.last_transmitted_value == 10);
+
+    // -------------------------------------------------------------------
+    // KEY ASSERTION: After block 1, last_update_frame should be at the
+    // last SUCCESSFULLY emitted tick (48), not at the FAILED tick (96).
+    //
+    // BUG: last_update_frame = 96 because it was set before the append
+    // attempt. The filter state has advanced past the value 20, which
+    // was never emitted. On the next block, the filter resumes from 96,
+    // permanently skipping the value 20.
+    //
+    // This assertion FAILS: 96 != 48.
+    // -------------------------------------------------------------------
+    REQUIRE(state.last_update_frame == 48u);
+
+    // ---- Block 2: switch to large capacity, advance current_frame ----
+    fx.processor().set_output_capacity(1024);
+    fx.reset_input();
+
+    // Block 2: current_frame=256, block_length=256. Block [256, 512).
+    // With buggy state: last_update_frame=96.
+    //   next_tick = 96 + 48 = 144. 144 < 256. Catch-up.
+    //   Catch-up advances filter from frame 96 to 256.
+    //   Ticks at 304, 352, ... are emitted.
+    //
+    // With correct state: last_update_frame=48.
+    //   next_tick = 48 + 48 = 96. 96 < 256. Catch-up.
+    //   Catch-up advances filter from frame 48 to 256.
+    //   Ticks at 304, 352, ... are emitted.
+    //
+    // In both cases, block 2 produces events (recovery works).
+    // The difference is the filter's internal state consistency.
+    fx.run(/*sample_rate=*/48000, /*current_frame=*/256, /*block_length=*/256);
+
+    const auto events_b2 = fx.get_output_events();
+
+    // Block 2 should produce events (recovery).
+    REQUIRE_FALSE(events_b2.empty());
+
+    // The first event in block 2 should be a CC7.
+    REQUIRE(events_b2[0].bytes[0] == 0xB0);
+    REQUIRE(events_b2[0].bytes[1] == 7);
+
+    // The value should be greater than 10 (the last emitted value from
+    // block 1). The filter continues converging toward 100.
+    REQUIRE(events_b2[0].bytes[2] > 10);
+
+    // The output must be structurally valid.
+    REQUIRE(fx.output()->atom.size <= 1024u);
+
+    // Events must be chronologically sorted.
+    for (size_t i = 1; i < events_b2.size(); ++i) {
+        REQUIRE(events_b2[i].frame_offset >= events_b2[i - 1].frame_offset);
+    }
 }
