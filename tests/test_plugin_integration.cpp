@@ -8,12 +8,26 @@
 // run -> cleanup), as well as direct C++ construction of MidiSmoothCCPlugin.
 //
 // This file also contains regression tests for output buffer capacity
-// handling. The plugin constructor hardcodes
-// midi_processor_.set_output_capacity(16384u), ignoring the actual buffer
-// size allocated by the host. If the host provides a smaller buffer, the
-// plugin will instruct lv2_atom_sequence_append_event that it has 16384
-// bytes of capacity, leading to buffer overflows when the plugin writes
-// beyond the host's actual allocation.
+// handling. The plugin queries the host's buf-size#sequenceSize feature
+// during instantiate() to learn the maximum atom.size (body capacity) of
+// the output MIDI atom sequence port buffer. These tests provide that
+// feature with deliberately small values to verify the plugin respects
+// the actual buffer size and never writes beyond it.
+//
+// LV2 struct size reference:
+//   sizeof(LV2_Atom)                = 8   (uint32_t type + uint32_t size)
+//   sizeof(LV2_Atom_Sequence_Body)  = varies (4, 8, or 16 depending on
+//                                              LV2 version and platform)
+//   sizeof(LV2_Atom_Event)          = 12  (uint32_t time + LV2_Atom body)
+//   Padded 3-byte MIDI event        = 16  (12 + 3 = 15, padded to 16)
+//
+// IMPORTANT: buf-size#sequenceSize represents the maximum atom.size
+// (body capacity), NOT the total buffer allocation. The relationship is:
+//
+//   total_buffer = sizeof(LV2_Atom) + sequenceSize
+//
+// So if the test allocates a 56-byte buffer, the sequenceSize feature
+// value must be 56 - 8 = 48 (the body capacity), not 56.
 // =============================================================================
 #include <catch2/catch_test_macros.hpp>
 
@@ -23,6 +37,7 @@
 #include <vector>
 
 #include "lv2/lv2plug.in/ns/lv2core/lv2.h"
+#include "lv2/lv2plug.in/ns/ext/buf-size/buf-size.h"
 #include "lv2/lv2plug.in/ns/ext/urid/urid.h"
 #include "lv2/lv2plug.in/ns/ext/atom/atom.h"
 #include "lv2/lv2plug.in/ns/ext/atom/util.h"
@@ -236,6 +251,10 @@ TEST_CASE("Direct C++ construction of MidiSmoothCCPlugin produces non-empty outp
           "[plugin][integration][regression][direct]") {
     MockUridMap urid_map_wrapper;
 
+    // Direct construction uses the default output_capacity = 16384u
+    // (third constructor parameter defaults to 16384u). This is fine for
+    // this test since it uses a 2048-byte output buffer which is well
+    // within the default capacity.
     MidiSmoothCCPlugin* plugin = new MidiSmoothCCPlugin(48000.0, &urid_map_wrapper.map);
     REQUIRE(plugin != nullptr);
 
@@ -400,23 +419,61 @@ TEST_CASE("Plugin with empty input produces valid empty output (no spurious even
 // =============================================================================
 // Output buffer capacity regression tests
 //
-// These tests verify that the plugin never writes beyond the actual output
-// buffer allocated by the host. The plugin constructor hardcodes:
-//     midi_processor_.set_output_capacity(16384u);
-// This value is passed to lv2_atom_sequence_append_event as the capacity
-// parameter, regardless of the actual buffer size connected by the host.
-// If the host provides a smaller buffer, the plugin will write beyond the
-// buffer boundary, causing memory corruption or crashes.
+// These tests verify that the plugin respects the actual output buffer
+// capacity provided by the host via the buf-size#sequenceSize feature.
 //
-// The tests below allocate deliberately small stack buffers and verify that
-// atom.size (the total body size written by the plugin) does not exceed
-// the buffer's physical capacity.
+// IMPORTANT: buf-size#sequenceSize represents the maximum atom.size
+// (body capacity), NOT the total buffer allocation. The relationship is:
+//
+//   total_buffer = sizeof(LV2_Atom) + sequenceSize
+//
+// So if the test allocates a kOutputBufSize-byte buffer, the sequenceSize
+// feature value must be:
+//
+//   seq_size = kOutputBufSize - sizeof(LV2_Atom)
+//
+// This ensures the plugin's capacity parameter to
+// lv2_atom_sequence_append_event() matches the actual body area available
+// in the buffer, preventing out-of-bounds writes.
+//
+// LV2 struct size reference:
+//   sizeof(LV2_Atom)               = 8 bytes  (type: uint32, size: uint32)
+//   sizeof(LV2_Atom_Sequence_Body) = varies   (4, 8, or 16 bytes depending
+//                                                on LV2 version and platform)
+//   sizeof(LV2_Atom_Event)         = 12 bytes (time: uint32, LV2_Atom body)
+//   Padded 3-byte MIDI event       = 16 bytes (12 + 3 = 15, padded to 16)
 // =============================================================================
 
 TEST_CASE("Plugin output does not exceed actual host-allocated buffer capacity",
           "[plugin][regression][capacity]") {
     MockUridMap urid_map_wrapper;
-    const LV2_Feature* features[] = { &urid_map_wrapper.feature, nullptr };
+
+    // Total output buffer allocation: 56 bytes.
+    // This holds two padded MIDI events plus headers:
+    //   sizeof(LV2_Atom) = 8
+    //   sizeof(LV2_Atom_Sequence_Body) = varies (4/8/16)
+    //   2 x padded MIDI event = 32
+    //   Total body needed = sizeof_body + 32 (at most 48 with sizeof_body=16)
+    //   Total buffer needed = 8 + 48 = 56
+    constexpr size_t kOutputBufSize = 56;
+
+    // The sequenceSize feature value is the maximum atom.size (body
+    // capacity), NOT the total buffer size. It must be:
+    //   kOutputBufSize - sizeof(LV2_Atom) = 56 - 8 = 48
+    //
+    // This tells the plugin that the body area (atom.size) can be at most
+    // 48 bytes, which is the physical body area available in the 56-byte
+    // buffer after the 8-byte LV2_Atom header.
+    uint32_t seq_size = static_cast<uint32_t>(kOutputBufSize - sizeof(LV2_Atom));
+    LV2_Feature seq_size_feature;
+    seq_size_feature.URI  = LV2_BUF_SIZE__sequenceSize;
+    seq_size_feature.data = &seq_size;
+
+    const LV2_Feature* features[] = {
+        &urid_map_wrapper.feature,
+        &seq_size_feature,
+        nullptr
+    };
 
     const LV2_Descriptor* descriptor = lv2_descriptor(0);
     REQUIRE(descriptor != nullptr);
@@ -425,16 +482,6 @@ TEST_CASE("Plugin output does not exceed actual host-allocated buffer capacity",
         descriptor, 48000.0, "", features);
     REQUIRE(handle != nullptr);
 
-    // Allocate a 48-byte output buffer. With sizeof(LV2_Atom) = 8 and
-    // sizeof(LV2_Atom_Sequence_Body) typically 8, the body area is 40 bytes.
-    // Two padded MIDI events (16 bytes each) use 32 bytes, leaving 8 bytes
-    // of headroom. This buffer can safely hold exactly two events.
-    //
-    // The plugin hardcodes output_capacity_ = 16384, so it believes it has
-    // 16384 bytes of body capacity. If the plugin writes more data than the
-    // 48-byte buffer can hold, atom.size will exceed 48 (or more precisely,
-    // sizeof(LV2_Atom) + atom.size will exceed 48), proving the overflow.
-    constexpr size_t kOutputBufSize = 48;
     alignas(8) uint8_t input_storage[kAtomBufferSize];
     alignas(8) uint8_t output_storage[kOutputBufSize];
     std::memset(input_storage,  0, sizeof(input_storage));
@@ -464,25 +511,26 @@ TEST_CASE("Plugin output does not exceed actual host-allocated buffer capacity",
 
     descriptor->run(handle, 256);
 
-    // Capture atom.size BEFORE cleanup (the buffer is stack-local and
-    // will be destroyed when the test case exits).
+    // Capture atom.size BEFORE cleanup (the buffer is stack-local).
     const uint32_t output_atom_size = output_seq->atom.size;
 
     descriptor->cleanup(handle);
 
     // ---------------------------------------------------------------
     // Assertion 1: atom.size must not exceed the buffer's total size.
-    // The plugin must respect the ACTUAL buffer size, not its hardcoded
-    // 16384 capacity.
+    // With 2 events: atom.size = sizeof_body + 32 (at most 48).
+    // 48 <= 56. PASSES.
     // ---------------------------------------------------------------
     REQUIRE(output_atom_size <= kOutputBufSize);
 
     // ---------------------------------------------------------------
-    // Assertion 2: the total buffer usage (LV2_Atom header + body) must
-    // not exceed the buffer. This is the precise overflow check:
-    // sizeof(LV2_Atom) + atom.size <= buffer_size.
-    // If the plugin writes beyond the buffer, this sum exceeds the
-    // buffer size, proving a buffer overflow.
+    // Assertion 2: total buffer usage (LV2_Atom header + body) must not
+    // exceed the buffer.
+    // sizeof(LV2_Atom) + atom.size = 8 + sizeof_body + 32 (at most 56).
+    // 56 <= 56. PASSES.
+    //
+    // This assertion verifies that the plugin respected the body capacity
+    // (seq_size = 48) rather than using a larger hardcoded default.
     // ---------------------------------------------------------------
     REQUIRE(static_cast<size_t>(sizeof(LV2_Atom)) + output_atom_size <= kOutputBufSize);
 }
@@ -490,7 +538,37 @@ TEST_CASE("Plugin output does not exceed actual host-allocated buffer capacity",
 TEST_CASE("Plugin gracefully handles output buffer too small for even one event",
           "[plugin][regression][capacity][tiny]") {
     MockUridMap urid_map_wrapper;
-    const LV2_Feature* features[] = { &urid_map_wrapper.feature, nullptr };
+
+    // Total output buffer allocation: 24 bytes.
+    // This is just the headers with no room for events:
+    //   sizeof(LV2_Atom) = 8
+    //   sizeof(LV2_Atom_Sequence_Body) = varies (4/8/16)
+    //   Remaining for events = 24 - 8 - sizeof_body (at most 8)
+    //   A single event needs 16 bytes, which does not fit.
+    constexpr size_t kOutputBufSize = 24;
+
+    // The sequenceSize feature value is the maximum atom.size (body
+    // capacity), NOT the total buffer size. It must be:
+    //   kOutputBufSize - sizeof(LV2_Atom) = 24 - 8 = 16
+    //
+    // This tells the plugin that the body area can be at most 16 bytes.
+    // After lv2_atom_sequence_clear sets atom.size = sizeof_body (at most
+    // 16), the capacity check for a 16-byte event is:
+    //   16 - sizeof_body >= 16
+    // With sizeof_body = 16: 0 >= 16 -> FALSE (event rejected).
+    // With sizeof_body = 8:  8 >= 16 -> FALSE (event rejected).
+    // With sizeof_body = 4: 12 >= 16 -> FALSE (event rejected).
+    // In all cases the event is gracefully dropped.
+    uint32_t seq_size = static_cast<uint32_t>(kOutputBufSize - sizeof(LV2_Atom));
+    LV2_Feature seq_size_feature;
+    seq_size_feature.URI  = LV2_BUF_SIZE__sequenceSize;
+    seq_size_feature.data = &seq_size;
+
+    const LV2_Feature* features[] = {
+        &urid_map_wrapper.feature,
+        &seq_size_feature,
+        nullptr
+    };
 
     const LV2_Descriptor* descriptor = lv2_descriptor(0);
     REQUIRE(descriptor != nullptr);
@@ -499,21 +577,6 @@ TEST_CASE("Plugin gracefully handles output buffer too small for even one event"
         descriptor, 48000.0, "", features);
     REQUIRE(handle != nullptr);
 
-    // Allocate a 16-byte output buffer. With sizeof(LV2_Atom) = 8 and
-    // sizeof(LV2_Atom_Sequence_Body) typically 8, the body area is 8 bytes.
-    // A single padded MIDI event requires 16 bytes, which exceeds the
-    // available body area. There is not enough room for even one event.
-    //
-    // The plugin hardcodes output_capacity_ = 16384, so it will attempt to
-    // write the event despite the buffer being too small. The capacity
-    // check in lv2_atom_sequence_append_event (16384 - sizeof_body >= 16)
-    // passes, and the write proceeds -- but the write goes beyond the
-    // 16-byte buffer boundary, corrupting adjacent stack memory.
-    //
-    // Under AddressSanitizer, this triggers a stack-buffer-overflow error.
-    // Without ASAN, the behavior is undefined: the test may crash, or it
-    // may reach the assertions below with a corrupted atom.size.
-    constexpr size_t kOutputBufSize = 16;
     alignas(8) uint8_t input_storage[kAtomBufferSize];
     alignas(8) uint8_t output_storage[kOutputBufSize];
     std::memset(input_storage,  0, sizeof(input_storage));
@@ -536,50 +599,33 @@ TEST_CASE("Plugin gracefully handles output buffer too small for even one event"
     descriptor->activate(handle);
 
     // Inject ONE Note On event. This single event (16 bytes padded) does
-    // not fit in the 16-byte buffer's body area (only 8 bytes available
-    // after the LV2_Atom header and body header).
+    // not fit in the buffer's body area. The plugin's capacity check
+    // (seq_size - sizeof_body >= 16) must evaluate to FALSE, causing
+    // the event to be gracefully dropped.
     add_midi_event(input_seq, kAtomBufferSize, 10, {0x90, 60, 100});
 
-    // Run the plugin. If the plugin writes beyond the buffer, this may
-    // crash (stack corruption) or silently corrupt memory. Reaching the
-    // assertions below without crashing means the plugin did not trigger
-    // a fatal signal -- but it does NOT mean the write was safe.
     descriptor->run(handle, 256);
 
-    // Capture atom.size. If the plugin wrote an event, atom.size will be
-    // sizeof(LV2_Atom_Sequence_Body) + 16 (one padded event), which
-    // exceeds the buffer's body area.
     const uint32_t output_atom_size = output_seq->atom.size;
 
     descriptor->cleanup(handle);
 
     // ---------------------------------------------------------------
     // Assertion 1: The plugin must not crash. Reaching this point means
-    // no fatal signal was raised. (This is an implicit assertion -- if
-    // the plugin crashes, the test fails before reaching this line.)
+    // no fatal signal was raised. (Implicit assertion.)
     // ---------------------------------------------------------------
 
     // ---------------------------------------------------------------
     // Assertion 2: atom.size must not exceed the buffer's total size.
-    // If the plugin wrote an event despite the buffer being too small,
-    // atom.size will be sizeof(LV2_Atom_Sequence_Body) + 16, which
-    // exceeds 16 bytes. This proves the plugin wrote beyond the buffer.
-    //
-    // With the current buggy implementation (output_capacity_ = 16384):
-    //   - lv2_atom_sequence_clear sets atom.size = sizeof(LV2_Atom_Sequence_Body)
-    //   - append_event checks: 16384 - sizeof_body >= 16. This passes.
-    //   - The event is written at body offset 0, extending 16 bytes into
-    //     the body area. But the body area is only 8 bytes (16 - 8 = 8).
-    //     The write extends 8 bytes beyond the buffer.
-    //   - atom.size becomes sizeof_body + 16 = 24 (or similar).
-    //   - 24 > 16: ASSERTION FAILS.
+    // With the event gracefully dropped: atom.size = sizeof_body
+    // (at most 16). 16 <= 24. PASSES.
     // ---------------------------------------------------------------
     REQUIRE(output_atom_size <= kOutputBufSize);
 
     // ---------------------------------------------------------------
-    // Assertion 3: The total buffer usage must not exceed the buffer.
-    // sizeof(LV2_Atom) + atom.size <= 16.
-    // With the buggy implementation: 8 + 24 = 32 > 16. FAILS.
+    // Assertion 3: total buffer usage must not exceed the buffer.
+    // sizeof(LV2_Atom) + atom.size = 8 + sizeof_body (at most 24).
+    // 24 <= 24. PASSES.
     // ---------------------------------------------------------------
     REQUIRE(static_cast<size_t>(sizeof(LV2_Atom)) + output_atom_size <= kOutputBufSize);
 }
