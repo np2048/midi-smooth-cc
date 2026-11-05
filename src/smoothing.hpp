@@ -23,6 +23,22 @@
 // Real-time safety: all methods are leaf functions: no allocation, no locks,
 // no I/O. State is two plain doubles per instance. The dt parameter is the
 // elapsed time in seconds since the last update for THIS filter state.
+//
+// COMPUTE / COMMIT PATTERN (added for overflow-safe output generation):
+//
+//   The compute() method calculates what the new filtered value WOULD be
+//   for a given (target, dt, params) triple, WITHOUT mutating current_value_
+//   or target_value_. This allows the caller to "preview" the result and
+//   only commit it if the downstream event append succeeds.
+//
+//   The commit() method applies a previously computed value by setting
+//   current_value_ (and target_value_ if a new target is provided). This
+//   is called ONLY after the event has been successfully written to the
+//   output buffer, guaranteeing that the filter state never advances past
+//   a failed emission.
+//
+//   The existing process() method is retained for backward compatibility
+//   and convenience. It calls compute() then commit() internally.
 // =============================================================================
 #pragma once
 
@@ -41,23 +57,27 @@ enum class SmoothingMode {
 // and release time constants.
 class ExponentialSmoother {
 public:
-    // Construct with an initial filtered value. Default is 0.0.
     explicit ExponentialSmoother(double initial_value = 0.0);
-
-    // Reinitialize both current and target state to initial_value with no
-    // interpolation. Used by Section 14 first-CC semantics.
     void reset(double initial_value);
 
-    // Advance the filter by one step.
-    //   target              : new target CC value (may be outside [0,127]).
-    //   dt_seconds          : elapsed time since the last call, in seconds.
-    //   tau_attack_seconds  : time constant used when target > current.
-    //   tau_release_seconds : time constant used when target <= current.
-    // Returns the new filtered value, clamped to [0.0, 127.0].
+    // Advance the filter by one step (compute + commit).
     double process(double target,
                    double dt_seconds,
                    double tau_attack_seconds,
                    double tau_release_seconds);
+
+    // Compute the new filtered value WITHOUT mutating internal state.
+    // This is used for overflow-safe output generation: the caller computes
+    // the value, attempts to append it to the output buffer, and only calls
+    // commit() if the append succeeds.
+    double compute(double target,
+                   double dt_seconds,
+                   double tau_attack_seconds,
+                   double tau_release_seconds) const;
+
+    // Commit a previously computed value. Updates target_value_ and
+    // current_value_. Called ONLY after successful event append.
+    void commit(double target, double new_value);
 
     double current_value() const noexcept;
     double target_value()  const noexcept;
@@ -71,23 +91,24 @@ private:
 // with independent rising and falling rates.
 class SlewRateLimiter {
 public:
-    // Construct with an initial filtered value. Default is 0.0.
     explicit SlewRateLimiter(double initial_value = 0.0);
-
-    // Reinitialize both current and target state to initial_value with no
-    // interpolation. Used by Section 14 first-CC semantics.
     void reset(double initial_value);
 
-    // Advance the filter by one step.
-    //   target                  : new target CC value (may be outside [0,127]).
-    //   dt_seconds              : elapsed time since the last call, in seconds.
-    //   rising_rate_cc_per_sec  : max upward rate, CC units per second.
-    //   falling_rate_cc_per_sec : max downward rate, CC units per second.
-    // Returns the new filtered value, clamped to [0.0, 127.0].
+    // Advance the filter by one step (compute + commit).
     double process(double target,
                    double dt_seconds,
                    double rising_rate_cc_per_sec,
                    double falling_rate_cc_per_sec);
+
+    // Compute the new filtered value WITHOUT mutating internal state.
+    double compute(double target,
+                   double dt_seconds,
+                   double rising_rate_cc_per_sec,
+                   double falling_rate_cc_per_sec) const;
+
+    // Commit a previously computed value. Updates target_value_ and
+    // current_value_. Called ONLY after successful event append.
+    void commit(double target, double new_value);
 
     double current_value() const noexcept;
     double target_value()  const noexcept;
