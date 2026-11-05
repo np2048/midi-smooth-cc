@@ -14,6 +14,14 @@
 //                correct frame offset (spec §8).
 //   Test Case 6: Output buffer overflow is handled gracefully (spec §11).
 //
+//   Regression tests (marked [midi][regression]):
+//     R1: Unselected events strictly pass through unchanged.
+//     R2: Selected CC7 triggers output generation when enabled.
+//     R3: enabled=false passes ALL events through unchanged.
+//     R4: Empty input yields empty output.
+//     R5: Valid input yields non-empty output when events are expected.
+//     R6: Full integration processing cycle — end-to-end smoke test.
+//
 // These tests focus on routing, state updates, and Atom Sequence
 // manipulation. They do NOT re-test the smoother math (covered in
 // test_smoothing.cpp).
@@ -68,34 +76,20 @@ public:
 
     explicit MidiProcessorFixture(uint32_t output_capacity = kDefaultCapacity)
         : output_capacity_(output_capacity) {
-        // Zero the raw buffers so every byte of both LV2_Atom_Sequence
-        // structs — including whichever body fields (capacity / unit / pad)
-        // the installed LV2 version defines — starts at 0. Only atom.type
-        // and atom.size are set explicitly below; the body is left zeroed.
-        // The append/iterate API takes capacity as an explicit parameter
-        // and never reads body fields directly, so this is safe and
-        // version-independent.
         std::memset(input_storage_,  0, kInputBufferBytes);
         std::memset(output_storage_, 0, kOutputBufferBytes);
 
-        // Initialize the processor with the dummy MIDI URID and the
-        // requested output buffer capacity.
         processor_.set_midi_urid(kMidiUrid);
         processor_.set_output_capacity(output_capacity_);
 
-        // Set up the input Atom Sequence as an empty sequence.
-        // atom.type = dummy; atom.size = sizeof(LV2_Atom_Sequence_Body)
-        // means "no events yet". Body fields are already zeroed by memset.
         input_ = reinterpret_cast<LV2_Atom_Sequence*>(input_storage_);
         input_->atom.type = kSeqType;
         input_->atom.size = sizeof(LV2_Atom_Sequence_Body);
 
-        // Set up the output Atom Sequence similarly.
         output_ = reinterpret_cast<LV2_Atom_Sequence*>(output_storage_);
         output_->atom.type = kSeqType;
         output_->atom.size = sizeof(LV2_Atom_Sequence_Body);
 
-        // Default parameters per spec §12.
         params_.enabled         = true;
         params_.smoothing_mode  = SmoothingMode::Exponential;
         params_.attack_ms       = 50;
@@ -105,28 +99,20 @@ public:
         params_.deadband        = 0;
         params_.output_rate_hz  = 100;
         params_.all_cc          = false;
-        params_.channel_mask    = 0xFFFF;             // all 16 channels
-        params_.cc_selection    = default_cc_selection();  // CC7 only
+        params_.channel_mask    = 0xFFFF;
+        params_.cc_selection    = default_cc_selection();
     }
 
-    // ---- Input buffer manipulation ----
-
     void reset_input() {
-        // Only atom.type and atom.size need to be reset to mark the
-        // sequence as empty. Body fields (zeroed at construction) are
-        // not touched here.
         input_->atom.type = kSeqType;
         input_->atom.size = sizeof(LV2_Atom_Sequence_Body);
     }
 
-    // Append a MIDI event to the input sequence at the given frame offset.
-    // Builds a contiguous (LV2_Atom_Event header + body bytes) on the stack
-    // so lv2_atom_sequence_append_event can copy both in one go.
     void add_midi_event(uint32_t frame_offset,
                         const uint8_t* bytes, size_t num_bytes) {
         struct StackEvent {
             LV2_Atom_Event header;
-            uint8_t        data[256];   // ample for any test MIDI event
+            uint8_t        data[256];
         } ev;
 
         ev.header.time.frames = frame_offset;
@@ -134,10 +120,6 @@ public:
         ev.header.body.size   = static_cast<uint32_t>(num_bytes);
         std::memcpy(ev.data, bytes, num_bytes);
 
-        // Input buffer capacity = total buffer bytes minus the LV2_Atom
-        // header. This is passed as the explicit capacity argument to
-        // lv2_atom_sequence_append_event; it is NOT read from any body
-        // field of the sequence.
         const uint32_t cap =
             static_cast<uint32_t>(kInputBufferBytes - sizeof(LV2_Atom));
         LV2_Atom_Event* appended =
@@ -149,8 +131,6 @@ public:
                         std::initializer_list<uint8_t> bytes) {
         add_midi_event(frame_offset, bytes.begin(), bytes.size());
     }
-
-    // ---- Output buffer inspection ----
 
     struct OutputEvent {
         uint32_t             frame_offset;
@@ -178,13 +158,9 @@ public:
         return get_output_events().size();
     }
 
-    // Verify the output sequence is structurally valid: atom.size never
-    // exceeds the configured capacity (spec §11 overflow safety invariant).
     bool output_is_valid() const {
         return output_->atom.size <= output_capacity_;
     }
-
-    // ---- Run the processor ----
 
     void run(uint32_t sample_rate   = 48000,
              uint32_t current_frame = 0,
@@ -193,8 +169,6 @@ public:
                            current_frame, block_length,
                            params_, states_);
     }
-
-    // ---- Accessors ----
 
     MidiProcessor&                 processor()       { return processor_; }
     PluginParameters&              params()          { return params_; }
@@ -208,15 +182,12 @@ private:
     std::array<FilterState, 2048>  states_;
     uint32_t                       output_capacity_;
 
-    // 8-byte aligned to satisfy LV2's pad-to-8 event layout.
     alignas(8) uint8_t input_storage_[kInputBufferBytes];
     alignas(8) uint8_t output_storage_[kOutputBufferBytes];
     LV2_Atom_Sequence* input_;
     LV2_Atom_Sequence* output_;
 };
 
-// Helper: find the first 3-byte CC event on (channel, cc_num) in the output.
-// Returns nullptr if not found.
 const MidiProcessorFixture::OutputEvent* find_cc_event(
     const std::vector<MidiProcessorFixture::OutputEvent>& events,
     uint8_t channel, uint8_t cc_num) {
@@ -235,17 +206,12 @@ const MidiProcessorFixture::OutputEvent* find_cc_event(
 
 // =============================================================================
 // Test Case 1: Pass-through of non-CC events (spec §10)
-//
-// Note On and Pitch Bend must appear in the output identically and at their
-// original frame offsets. Neither event type is ever delayed or modified.
 // =============================================================================
 TEST_CASE("Non-CC MIDI events pass through unchanged with original frame offsets",
           "[midi][pass-through]") {
     MidiProcessorFixture fx;
 
-    // Note On: channel 0, note 60, velocity 100, at frame offset 10.
     fx.add_midi_event(10, {0x90, 60, 100});
-    // Pitch Bend: channel 0, LSB=0x00, MSB=0x40 (center), at frame offset 20.
     fx.add_midi_event(20, {0xE0, 0x00, 0x40});
 
     fx.run(/*sample_rate=*/48000, /*current_frame=*/0, /*block_length=*/256);
@@ -253,14 +219,12 @@ TEST_CASE("Non-CC MIDI events pass through unchanged with original frame offsets
     const auto events = fx.get_output_events();
     REQUIRE(events.size() == 2);
 
-    // Note On — verbatim, original frame offset.
     REQUIRE(events[0].frame_offset == 10);
     REQUIRE(events[0].bytes.size() == 3);
     REQUIRE(events[0].bytes[0] == 0x90);
     REQUIRE(events[0].bytes[1] == 60);
     REQUIRE(events[0].bytes[2] == 100);
 
-    // Pitch Bend — verbatim, original frame offset.
     REQUIRE(events[1].frame_offset == 20);
     REQUIRE(events[1].bytes.size() == 3);
     REQUIRE(events[1].bytes[0] == 0xE0);
@@ -270,60 +234,40 @@ TEST_CASE("Non-CC MIDI events pass through unchanged with original frame offsets
 
 // =============================================================================
 // Test Case 2: First CC initializes the FilterState (spec §14)
-//
-// When a selected (channel, CC) pair receives its first CC, the filter state
-// must be initialized from the incoming value — no ramp from zero. The CC is
-// consumed (not passed through). last_transmitted_value is set to -1 to force
-// the next output tick to emit.
 // =============================================================================
 TEST_CASE("First CC on a selected pair initializes FilterState from incoming value",
           "[midi][init]") {
     MidiProcessorFixture fx;
 
-    // CC7 value 50 on channel 0 at frame offset 5.
     fx.add_midi_event(5, {0xB0, 7, 50});
 
-    // Default params: output_rate_hz = 100, sample_rate = 48000
-    // → frames_per_tick = 480. Block length = 256, so the first output tick
-    // (at frame 5 + 480 = 485) falls outside the block → no emission happens
-    // this block, isolating the init behavior from output generation.
     fx.run(/*sample_rate=*/48000, /*current_frame=*/0, /*block_length=*/256);
 
-    // CC7 is selected → consumed, not passed through. Output must be empty.
     REQUIRE(fx.output_event_count() == 0);
 
-    // Verify FilterState for (channel 0, CC 7).
     FilterState& state = fx.states()[0 * 128 + 7];
     REQUIRE(state.is_initialized        == true);
-    REQUIRE(state.last_transmitted_value == -1);   // force next tick to emit
+    REQUIRE(state.last_transmitted_value == -1);
 
-    // Both smoothers initialized to the incoming value (no ramp from zero).
     REQUIRE(state.exp_smoother.current_value() == 50.0);
     REQUIRE(state.exp_smoother.target_value()  == 50.0);
     REQUIRE(state.slew_limiter.current_value() == 50.0);
     REQUIRE(state.slew_limiter.target_value()  == 50.0);
 
-    // last_update_frame = current_frame + event frame offset = 0 + 5 = 5.
     REQUIRE(state.last_update_frame == 5u);
 
-    // No other state should have been touched.
     REQUIRE(fx.states()[0 * 128 + 6].is_initialized == false);
     REQUIRE(fx.states()[1 * 128 + 7].is_initialized == false);
 }
 
 // =============================================================================
 // Test Case 3: Bypass mode forwards all events unchanged (spec §14)
-//
-// When params.enabled == false, every input event (including CCs on selected
-// channel/CC pairs) must be copied verbatim to the output. FilterStates must
-// not be initialized or mutated.
 // =============================================================================
 TEST_CASE("Bypass mode forwards CC and Note On unchanged, leaves state uninitialized",
           "[midi][bypass]") {
     MidiProcessorFixture fx;
-    fx.params().enabled = false;   // bypass ON
+    fx.params().enabled = false;
 
-    // CC7 (selected by default) and Note On, both on channel 0.
     fx.add_midi_event(10, {0xB0, 7, 80});
     fx.add_midi_event(20, {0x90, 60, 100});
 
@@ -332,21 +276,18 @@ TEST_CASE("Bypass mode forwards CC and Note On unchanged, leaves state uninitial
     const auto events = fx.get_output_events();
     REQUIRE(events.size() == 2);
 
-    // CC7 must appear unchanged — even though it would normally be consumed.
     REQUIRE(events[0].frame_offset == 10);
     REQUIRE(events[0].bytes.size() == 3);
     REQUIRE(events[0].bytes[0] == 0xB0);
     REQUIRE(events[0].bytes[1] == 7);
     REQUIRE(events[0].bytes[2] == 80);
 
-    // Note On must appear unchanged.
     REQUIRE(events[1].frame_offset == 20);
     REQUIRE(events[1].bytes.size() == 3);
     REQUIRE(events[1].bytes[0] == 0x90);
     REQUIRE(events[1].bytes[1] == 60);
     REQUIRE(events[1].bytes[2] == 100);
 
-    // The CC7 FilterState must remain uninitialized despite the CC input.
     FilterState& state = fx.states()[0 * 128 + 7];
     REQUIRE(state.is_initialized        == false);
     REQUIRE(state.last_transmitted_value == -1);
@@ -356,16 +297,11 @@ TEST_CASE("Bypass mode forwards CC and Note On unchanged, leaves state uninitial
 // =============================================================================
 // Test Case 4: CC selection — selected CC consumed, unselected CC passes
 // through (spec §5)
-//
-// Default config selects only CC7. CC1 is unselected and must pass through
-// verbatim. CC7 is consumed (does not appear in output) and its FilterState
-// becomes initialized.
 // =============================================================================
 TEST_CASE("Selected CC is consumed; unselected CC passes through unchanged",
           "[midi][selection]") {
     MidiProcessorFixture fx;
 
-    // CC7 value 50, CC1 value 100, both on channel 0.
     fx.add_midi_event(10, {0xB0, 7, 50});
     fx.add_midi_event(20, {0xB0, 1, 100});
 
@@ -373,24 +309,20 @@ TEST_CASE("Selected CC is consumed; unselected CC passes through unchanged",
 
     const auto events = fx.get_output_events();
 
-    // CC1 should pass through unchanged.
     const auto* cc1_ev = find_cc_event(events, /*channel=*/0, /*cc=*/1);
     REQUIRE(cc1_ev != nullptr);
     REQUIRE(cc1_ev->frame_offset == 20);
     REQUIRE(cc1_ev->bytes[2] == 100);
 
-    // CC7 should NOT appear in the output (it was consumed into the filter).
     const auto* cc7_ev = find_cc_event(events, /*channel=*/0, /*cc=*/7);
     REQUIRE(cc7_ev == nullptr);
 
-    // FilterState for CC7 must be initialized from the incoming value.
     FilterState& cc7_state = fx.states()[0 * 128 + 7];
     REQUIRE(cc7_state.is_initialized        == true);
     REQUIRE(cc7_state.last_transmitted_value == -1);
     REQUIRE(cc7_state.exp_smoother.current_value() == 50.0);
     REQUIRE(cc7_state.exp_smoother.target_value()  == 50.0);
 
-    // FilterState for CC1 must remain uninitialized.
     FilterState& cc1_state = fx.states()[0 * 128 + 1];
     REQUIRE(cc1_state.is_initialized == false);
 }
@@ -398,55 +330,29 @@ TEST_CASE("Selected CC is consumed; unselected CC passes through unchanged",
 // =============================================================================
 // Test Case 5: Output generation emits a quantized CC at the correct frame
 // offset (spec §8)
-//
-// A pre-initialized FilterState with a stale last_update_frame and a target
-// different from last_transmitted_value must trigger an emission on the first
-// output tick that falls within the current block. The emitted event must be
-// at the correct frame offset and carry the quantized filtered value.
 // =============================================================================
 TEST_CASE("Output generation emits quantized CC at the correct frame offset",
           "[midi][output]") {
     MidiProcessorFixture fx;
 
-    // High output rate (1000 Hz) → frames_per_tick = 48000 / 1000 = 48.
     fx.params().output_rate_hz = 1000;
-    // Slew mode with a very high rate so the filter reaches the target
-    // exactly during the catch-up step, making the expected value predictable.
     fx.params().smoothing_mode = SmoothingMode::Slew;
-    fx.params().rising_rate    = 10000;   // CC/s
+    fx.params().rising_rate    = 10000;
     fx.params().falling_rate   = 10000;
 
-    // Pre-initialize the FilterState for CC7 on channel 0.
     FilterState& state = fx.states()[0 * 128 + 7];
     state.is_initialized = true;
     state.exp_smoother.reset(0.0);
     state.slew_limiter.reset(0.0);
-    // Set target to 100 on both smoothers without advancing current_value
-    // (the dt = 0 trick: alpha = 0 for exp, max_delta = 0 for slew).
     state.exp_smoother.process(100.0, 0.0, 0.05, 0.1);
     state.slew_limiter.process(100.0, 0.0, 10000.0, 10000.0);
-    state.last_transmitted_value = 0;       // different from target → will emit
-    state.last_update_frame      = 0;       // in the past relative to current_frame
+    state.last_transmitted_value = 0;
+    state.last_update_frame      = 0;
 
-    // Block: current_frame = 1000, block_length = 100, sample_rate = 48000.
-    // frames_per_tick = 48.
-    //
-    // Catch-up: from frame 0 to 1000, dt = 1000/48000 ≈ 0.0208 s.
-    //   slew step = min(100, 10000 * 0.0208) = min(100, 208) = 100
-    //   → current_value reaches 100, last_update_frame = 1000.
-    //   (No emission for the catch-up step — it is in the past.)
-    //
-    // First tick in block: 1000 + 48 = 1048. frame_offset = 48.
-    //   dt = 48/48000 = 0.001 s. delta = 0. Value = 100. Quantized = 100.
-    //   100 != last_transmitted (0) → EMIT at frame_offset 48, value 100.
-    //
-    // Second tick: 1096. frame_offset = 96.
-    //   Value still 100. 100 == last_transmitted (100) → no emit.
     fx.run(/*sample_rate=*/48000, /*current_frame=*/1000, /*block_length=*/100);
 
     const auto events = fx.get_output_events();
 
-    // Exactly one CC7 event should have been emitted.
     size_t cc7_count = 0;
     for (const auto& ev : events) {
         if (ev.bytes.size() == 3 &&
@@ -459,37 +365,22 @@ TEST_CASE("Output generation emits quantized CC at the correct frame offset",
     }
     REQUIRE(cc7_count == 1);
 
-    // last_transmitted_value must have been updated to 100.
     REQUIRE(state.last_transmitted_value == 100);
-
-    // last_update_frame must have advanced past the emitted tick.
     REQUIRE(state.last_update_frame >= 1048u);
 }
 
 // =============================================================================
 // Test Case 6: Output buffer overflow safety (spec §11)
-//
-// With a very small output_capacity (32 bytes), at most one padded MIDI
-// event fits (sizeof(LV2_Atom_Event) + 3 = 15, padded to 16; 4 + 16 = 20 ≤
-// 32; a second event would need 36 bytes). The processor must drop the
-// overflow event gracefully, never crash, and leave the output sequence
-// structurally valid (atom.size ≤ capacity).
 // =============================================================================
 TEST_CASE("Output buffer overflow is handled gracefully without corruption",
           "[midi][overflow]") {
-    // capacity = 32 bytes. The fixture's underlying buffer is 2048 bytes,
-    // so there is ample physical space; the capacity is what limits writes.
     MidiProcessorFixture fx(/*output_capacity=*/32);
 
-    // High output rate + high slew rate so each tick changes the integer
-    // value and forces an emit attempt.
-    fx.params().output_rate_hz = 1000;      // frames_per_tick = 48
+    fx.params().output_rate_hz = 1000;
     fx.params().smoothing_mode = SmoothingMode::Slew;
-    fx.params().rising_rate    = 10000;     // 10 CC per tick (dt = 0.001 s)
+    fx.params().rising_rate    = 10000;
     fx.params().falling_rate   = 10000;
 
-    // Pre-initialize CC7: target 100, current 0, last emitted 0.
-    // Each tick moves 10 CC units: tick 48 → value 10, tick 96 → value 20.
     FilterState& state = fx.states()[0 * 128 + 7];
     state.is_initialized = true;
     state.exp_smoother.reset(0.0);
@@ -497,26 +388,266 @@ TEST_CASE("Output buffer overflow is handled gracefully without corruption",
     state.exp_smoother.process(100.0, 0.0, 0.05, 0.1);
     state.slew_limiter.process(100.0, 0.0, 10000.0, 10000.0);
     state.last_transmitted_value = 0;
-    state.last_update_frame      = 0;       // current_frame = 0 → no catch-up
+    state.last_update_frame      = 0;
 
-    // Block: 100 frames at 48000 Hz. Ticks at frames 48 and 96.
-    // Tick 48: value = 10. Emit succeeds. atom.size: 4 → 20.
-    // Tick 96: value = 20. Emit fails (20 + 16 = 36 > 32). Graceful drop.
     fx.run(/*sample_rate=*/48000, /*current_frame=*/0, /*block_length=*/100);
 
-    // Reaching this assertion means the function returned without crashing.
-    // Verify the output sequence is structurally valid.
     REQUIRE(fx.output_is_valid());
     REQUIRE(fx.output()->atom.size <= fx.output_capacity());
 
-    // Exactly one event was successfully emitted (the first tick).
     const auto events = fx.get_output_events();
     REQUIRE(events.size() == 1);
 
-    // The single emitted event must be well-formed.
     REQUIRE(events[0].frame_offset == 48u);
     REQUIRE(events[0].bytes.size() == 3);
     REQUIRE(events[0].bytes[0] == 0xB0);
     REQUIRE(events[0].bytes[1] == 7);
-    REQUIRE(events[0].bytes[2] == 10);   // 0 + 10000 * 0.001 = 10
+    REQUIRE(events[0].bytes[2] == 10);
+}
+
+// =============================================================================
+// CRITICAL BUG REGRESSION TESTS
+//
+// The following tests guard against a bug where the plugin receives MIDI
+// events but outputs nothing. Each test is preceded by a mandatory comment
+// block that MUST NOT be removed during test suite optimization.
+// =============================================================================
+
+// CRITICAL BUG REGRESSION: MIDI Event Drop Issue.
+// This test ensures the plugin correctly routes, passes through, and emits MIDI events.
+// DO NOT REMOVE during test suite optimization or shrinking.
+TEST_CASE("Regression: Unselected events pass through to output unchanged",
+          "[midi][regression]") {
+    MidiProcessorFixture fx;
+
+    // Feed a Note On and a Pitch Bend — neither is a CC, so both must
+    // pass through verbatim regardless of channel/CC selection.
+    fx.add_midi_event(5, {0x90, 60, 100});       // Note On, ch0, note 60, vel 100
+    fx.add_midi_event(15, {0xE0, 0x00, 0x40});   // Pitch Bend, ch0, center
+
+    fx.run(/*sample_rate=*/48000, /*current_frame=*/0, /*block_length=*/256);
+
+    const auto events = fx.get_output_events();
+
+    // Output must NOT be empty — both events must appear.
+    REQUIRE_FALSE(events.empty());
+    REQUIRE(events.size() == 2);
+
+    // Note On — strictly identical, same frame offset.
+    REQUIRE(events[0].frame_offset == 5u);
+    REQUIRE(events[0].bytes.size() == 3);
+    REQUIRE(events[0].bytes[0] == 0x90);
+    REQUIRE(events[0].bytes[1] == 60);
+    REQUIRE(events[0].bytes[2] == 100);
+
+    // Pitch Bend — strictly identical, same frame offset.
+    REQUIRE(events[1].frame_offset == 15u);
+    REQUIRE(events[1].bytes.size() == 3);
+    REQUIRE(events[1].bytes[0] == 0xE0);
+    REQUIRE(events[1].bytes[1] == 0x00);
+    REQUIRE(events[1].bytes[2] == 0x40);
+}
+
+// CRITICAL BUG REGRESSION: MIDI Event Drop Issue.
+// This test ensures the plugin correctly routes, passes through, and emits MIDI events.
+// DO NOT REMOVE during test suite optimization or shrinking.
+TEST_CASE("Regression: Selected CC7 triggers output generation when enabled",
+          "[midi][regression]") {
+    MidiProcessorFixture fx;
+
+    // High output rate so at least one tick falls within a 256-frame block.
+    // frames_per_tick = 48000 / 1000 = 48. Ticks at frames 48, 96, 144, 192, 240.
+    fx.params().output_rate_hz = 1000;
+
+    // Feed a CC7 event on channel 0 (selected by default). This must be
+    // consumed (not passed through) AND must trigger output generation.
+    fx.add_midi_event(0, {0xB0, 7, 50});
+
+    fx.run(/*sample_rate=*/48000, /*current_frame=*/0, /*block_length=*/256);
+
+    const auto events = fx.get_output_events();
+
+    // Output must NOT be empty — the CC7 event triggers output generation.
+    // The CC7 input itself is consumed (not passed through), so all output
+    // events must be generated CC7 emissions.
+    REQUIRE_FALSE(events.empty());
+
+    // At least one CC7 event must be present in the output.
+    const auto* cc7_ev = find_cc_event(events, /*channel=*/0, /*cc=*/7);
+    REQUIRE(cc7_ev != nullptr);
+
+    // The first output tick is at frame 0 + 48 = 48.
+    REQUIRE(cc7_ev->frame_offset == 48u);
+
+    // The filter was initialized from the incoming value 50 (spec §14:
+    // no ramp from zero). The first tick quantizes to 50 and is emitted
+    // because last_transmitted_value was -1 (force-emit on first tick).
+    REQUIRE(cc7_ev->bytes[2] == 50);
+
+    // Verify the filter state was initialized and last_transmitted was updated.
+    FilterState& state = fx.states()[0 * 128 + 7];
+    REQUIRE(state.is_initialized == true);
+    REQUIRE(state.last_transmitted_value == 50);
+}
+
+// CRITICAL BUG REGRESSION: MIDI Event Drop Issue.
+// This test ensures the plugin correctly routes, passes through, and emits MIDI events.
+// DO NOT REMOVE during test suite optimization or shrinking.
+TEST_CASE("Regression: Bypass (enabled=false) passes ALL events through unchanged",
+          "[midi][regression]") {
+    MidiProcessorFixture fx;
+    fx.params().enabled = false;
+
+    // Feed a mix of event types: Note On, CC7 (selected), Pitch Bend.
+    // In bypass mode, ALL must pass through unchanged — including CC7,
+    // which would normally be consumed.
+    fx.add_midi_event(5,  {0x90, 60, 100});       // Note On
+    fx.add_midi_event(10, {0xB0, 7, 80});         // CC7 (selected by default)
+    fx.add_midi_event(15, {0xE0, 0x00, 0x40});    // Pitch Bend
+
+    fx.run(/*sample_rate=*/48000, /*current_frame=*/0, /*block_length=*/256);
+
+    const auto events = fx.get_output_events();
+
+    // All three events must appear in the output.
+    REQUIRE_FALSE(events.empty());
+    REQUIRE(events.size() == 3);
+
+    // Note On — unchanged.
+    REQUIRE(events[0].frame_offset == 5u);
+    REQUIRE(events[0].bytes[0] == 0x90);
+    REQUIRE(events[0].bytes[1] == 60);
+    REQUIRE(events[0].bytes[2] == 100);
+
+    // CC7 — must appear in output (NOT consumed in bypass mode).
+    REQUIRE(events[1].frame_offset == 10u);
+    REQUIRE(events[1].bytes[0] == 0xB0);
+    REQUIRE(events[1].bytes[1] == 7);
+    REQUIRE(events[1].bytes[2] == 80);
+
+    // Pitch Bend — unchanged.
+    REQUIRE(events[2].frame_offset == 15u);
+    REQUIRE(events[2].bytes[0] == 0xE0);
+    REQUIRE(events[2].bytes[1] == 0x00);
+    REQUIRE(events[2].bytes[2] == 0x40);
+
+    // No filter states should have been initialized or mutated.
+    REQUIRE(fx.states()[0 * 128 + 7].is_initialized == false);
+}
+
+// CRITICAL BUG REGRESSION: MIDI Event Drop Issue.
+// This test ensures the plugin correctly routes, passes through, and emits MIDI events.
+// DO NOT REMOVE during test suite optimization or shrinking.
+TEST_CASE("Regression: Empty input sequence yields empty output sequence",
+          "[midi][regression]") {
+    MidiProcessorFixture fx;
+
+    // Do NOT add any input events. The input sequence is empty (atom.size
+    // == sizeof(LV2_Atom_Sequence_Body), meaning zero events).
+    // No filter states are pre-initialized (all is_initialized == false).
+    // Therefore the output must also be empty.
+
+    fx.run(/*sample_rate=*/48000, /*current_frame=*/0, /*block_length=*/256);
+
+    const auto events = fx.get_output_events();
+
+    // Output must be empty — no pass-through events and no generated events.
+    REQUIRE(events.empty());
+    REQUIRE(fx.output_event_count() == 0);
+
+    // The output sequence must still be structurally valid (empty but
+    // well-formed: atom.size == sizeof(LV2_Atom_Sequence_Body)).
+    REQUIRE(fx.output()->atom.size == sizeof(LV2_Atom_Sequence_Body));
+}
+
+// CRITICAL BUG REGRESSION: MIDI Event Drop Issue.
+// This test ensures the plugin correctly routes, passes through, and emits MIDI events.
+// DO NOT REMOVE during test suite optimization or shrinking.
+TEST_CASE("Regression: Valid input sequence yields non-empty output when events are expected",
+          "[midi][regression]") {
+    MidiProcessorFixture fx;
+
+    // Feed a single Note On event. This is a non-CC event that must
+    // pass through to the output unchanged.
+    fx.add_midi_event(10, {0x90, 60, 100});
+
+    fx.run(/*sample_rate=*/48000, /*current_frame=*/0, /*block_length=*/256);
+
+    const auto events = fx.get_output_events();
+
+    // Output must NOT be empty — the Note On must appear in the output.
+    REQUIRE_FALSE(events.empty());
+    REQUIRE(events.size() >= 1);
+
+    // Verify the first output event is the Note On, unchanged.
+    REQUIRE(events[0].frame_offset == 10u);
+    REQUIRE(events[0].bytes[0] == 0x90);
+    REQUIRE(events[0].bytes[1] == 60);
+    REQUIRE(events[0].bytes[2] == 100);
+}
+
+// CRITICAL BUG REGRESSION: MIDI Event Drop Issue.
+// This test ensures the plugin correctly routes, passes through, and emits MIDI events.
+// DO NOT REMOVE during test suite optimization or shrinking.
+TEST_CASE("Regression: Full integration processing cycle — end-to-end smoke test",
+          "[midi][regression][integration]") {
+    MidiProcessorFixture fx;
+
+    // Use a high output rate so CC7 output generation fires within the block.
+    fx.params().output_rate_hz = 1000;  // frames_per_tick = 48 at 48000 Hz
+
+    // Feed a realistic mix: a Note On (pass-through) and a CC7 (consumed +
+    // triggers output generation). Both on channel 0.
+    fx.add_midi_event(10, {0x90, 60, 100});    // Note On at frame 10
+    fx.add_midi_event(20, {0xB0, 7, 50});      // CC7 at frame 20
+
+    fx.run(/*sample_rate=*/48000, /*current_frame=*/0, /*block_length=*/256);
+
+    const auto events = fx.get_output_events();
+
+    // --- Assertion 1: Output must NOT be empty ---
+    // This is the critical regression check. If the bug is present, the
+    // output would be empty despite valid input. Both the Note On
+    // pass-through AND the CC7 output generation contribute events.
+    REQUIRE_FALSE(events.empty());
+    REQUIRE(events.size() >= 2);
+
+    // --- Assertion 2: Note On must be present (pass-through path) ---
+    bool found_note_on = false;
+    for (const auto& ev : events) {
+        if (ev.bytes.size() == 3 && ev.bytes[0] == 0x90) {
+            REQUIRE(ev.frame_offset == 10u);
+            REQUIRE(ev.bytes[1] == 60);
+            REQUIRE(ev.bytes[2] == 100);
+            found_note_on = true;
+            break;
+        }
+    }
+    REQUIRE(found_note_on);
+
+    // --- Assertion 3: CC7 must be present in output (generation path) ---
+    // The CC7 input at frame 20 is consumed (not passed through). But the
+    // output generation loop must emit at least one CC7 event. The first
+    // tick after frame 20 is at 20 + 48 = 68.
+    bool found_cc7_output = false;
+    for (const auto& ev : events) {
+        if (ev.bytes.size() == 3 && ev.bytes[0] == 0xB0 && ev.bytes[1] == 7) {
+            // First output tick is at frame 20 + 48 = 68.
+            REQUIRE(ev.frame_offset == 68u);
+            // Value quantized from the initialized filter state (50).
+            REQUIRE(ev.bytes[2] == 50);
+            found_cc7_output = true;
+            break;
+        }
+    }
+    REQUIRE(found_cc7_output);
+
+    // --- Assertion 4: Filter state was initialized and updated ---
+    FilterState& state = fx.states()[0 * 128 + 7];
+    REQUIRE(state.is_initialized == true);
+    REQUIRE(state.last_transmitted_value == 50);
+
+    // --- Assertion 5: Output sequence is structurally valid ---
+    REQUIRE(fx.output_is_valid());
+    REQUIRE(fx.output()->atom.size <= fx.output_capacity());
 }
