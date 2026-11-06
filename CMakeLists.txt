@@ -40,7 +40,7 @@ target_include_directories(midi_smooth_cc_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${LV2_INCLUDE_DIRS}
 )
-target_compile_options(midi_smooth_cc_core PRIVATE ${LV2_CFLAGS_OTHER})
+target_compile_options(midi_smooth_cc_core PRIVATE ${LV2_CFLAGS_OTHER} -Wall -Wextra)
 
 # =============================================================================
 # Plugin shared library: midi-smooth-cc.so
@@ -53,7 +53,7 @@ target_include_directories(midi_smooth_cc PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${LV2_INCLUDE_DIRS}
 )
-target_compile_options(midi_smooth_cc PRIVATE ${LV2_CFLAGS_OTHER})
+target_compile_options(midi_smooth_cc PRIVATE ${LV2_CFLAGS_OTHER} -Wall -Wextra)
 
 set_target_properties(midi_smooth_cc PROPERTIES
     PREFIX ""
@@ -129,16 +129,19 @@ if(MIDI_SMOOTH_CC_BUILD_TESTS)
     endif()
 
     # --- Test sources ---
-    # test_plugin_integration.cpp: full MidiSmoothCCPlugin lifecycle test.
-    # test_carla_replication.cpp:  replicates Carla's exact environment.
-    # Both require src/plugin.cpp compiled into the test executable so that
-    # lv2_descriptor() and MidiSmoothCCPlugin are accessible.
+    # Tests that touch lv2_descriptor()/MidiSmoothCCPlugin need src/plugin.cpp
+    # compiled into the test executable (added below).
+    #   test_plugin_integration.cpp: full plugin lifecycle.
+    #   test_carla_replication.cpp:  replicates Carla's runtime environment.
+    #   test_host_contract.cpp:      output atom type, host-announced capacity,
+    #                                connect_port(nullptr).
     set(TEST_SOURCES
         tests/test_smoothing.cpp
         tests/test_midi.cpp
         tests/test_channels.cpp
         tests/test_plugin_integration.cpp
         tests/test_carla_replication.cpp
+        tests/test_host_contract.cpp
     )
 
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/main.cpp")
@@ -167,7 +170,7 @@ endif()
 # =============================================================================
 message(STATUS "")
 message(STATUS "=== MIDI Smooth CC configuration ===")
-message(STATUS "  Plugin URI:       ${MIDI_SMOOTH_CC_URI}")
+message(STATUS "  Plugin URI:         ${MIDI_SMOOTH_CC_URI}")
 message(STATUS "  LV2 bundle (build): ${LV2_BUNDLE_DIR}")
 message(STATUS "  LV2 install dir:    ${LV2_INSTALL_DIR}/midi-smooth-cc.lv2")
 message(STATUS "  Build tests:        ${MIDI_SMOOTH_CC_BUILD_TESTS}")

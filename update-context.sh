@@ -4,11 +4,16 @@
 
 mkdir -p tmp
 
-echo "cat src/*" >tmp/code.py
-cat src/* >>tmp/code.py
-echo "---" >>tmp/code.py
-echo "cat lv2/*" >>tmp/code.py
-cat lv2/* >>tmp/code.py
+echo "cat src/*" >tmp/code.cpp
+cat src/* >>tmp/code.cpp
 
-echo "cat rpn_calc/tests/*" >tmp/tests.py
-cat tests/* >>tmp/tests.py
+echo "---" >>tmp/code.cpp
+echo "cat lv2/*" >>tmp/code.cpp
+cat lv2/* >>tmp/code.cpp
+
+echo "---" >>tmp/code.cpp
+echo "cat CMakeLists.txt" >>tmp/code.cpp
+cat CMakeLists.txt >>tmp/code.cpp
+
+echo "cat rpn_calc/tests/*" >tmp/tests.cpp
+cat tests/* >>tmp/tests.cpp

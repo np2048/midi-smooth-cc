@@ -1,46 +1,18 @@
 // midi-smooth-cc/src/plugin.hpp
-
-// =============================================================================
-// MIDI Smooth CC - LV2 plugin entry-point class
 //
-// Declares the C++ class that backs the LV2 plugin descriptor. The host
-// never instantiates this class directly; instead, the extern "C"
-// `lv2_descriptor()` returns a static LV2_Descriptor whose `instantiate`
-// callback creates a MidiSmoothCCPlugin via `new` and returns it as an
-// LV2_Handle (opaque void*).
+// MIDI Smooth CC - LV2 plugin entry-point class.
 //
-// Lifecycle (all orchestrated by the host):
-//   instantiate()       : new MidiSmoothCCPlugin(...). Non-real-time.
-//   connect_port()      : store port connection pointers.
-//   activate()          : reset timing state.
-//   run()               : THE real-time callback. Top of run() reads all
-//                         control port values into a local PluginParameters
-//                         snapshot (no mutexes), then calls
-//                         MidiProcessor::process().
-//   deactivate()        : no-op.
-//   cleanup()           : delete the instance.
-//   extension_data()    : return nullptr for v1.0.
+// Port layout (must match lv2/plugin.ttl.in):
+//   0 MIDI in, 1 MIDI out, 2 enabled, 3 smoothing_mode, 4 attack_ms,
+//   5 release_ms, 6 rising_rate, 7 falling_rate, 8 deadband,
+//   9 output_rate_hz, 10 all_cc, 11 channel_mask, 12..139 cc_selection[0..127]
 //
-// Port layout (indices MUST match lv2/plugin.ttl.in):
-//   Index 0   : MIDI input  (atom:Sequence, input)
-//   Index 1   : MIDI output (atom:Sequence, output)
-//   Index 2   : enabled
-//   Index 3   : smoothing_mode (0=Exp 1=Slew)
-//   Index 4-9 : attack_ms, release_ms, rising_rate, falling_rate,
-//               deadband, output_rate_hz
-//   Index 10  : all_cc
-//   Index 11  : channel_mask (16-bit bitmask)
-//   Index 12..139 : cc_selection[0..127]
-//   Total: 140 ports.
-//
-// 64-BIT FRAME COUNTER:
-//   current_frame_ is uint64_t to support sessions longer than ~24.9 hours
-//   at 48 kHz. It is passed directly to MidiProcessor::process() without
-//   any narrowing cast. The process() method accepts uint64_t.
-//
-// The plugin URI string MUST match manifest.ttl.in and plugin.ttl.in:
-//     "urn:midi-smooth-cc:plugin"
-// =============================================================================
+// Output capacity handling (host-contract fix):
+//   A spec-compliant host sets the output atom.size to the buffer CAPACITY
+//   before run(). run() adopts that value (host_capacity_) unless it equals
+//   the size we ourselves left behind (stale), falling back to
+//   default_capacity_ (buf-size feature or 16384) for hosts that do not
+//   pre-set it.
 #pragma once
 
 #include <array>
@@ -111,10 +83,12 @@ private:
     float* port_cc_selection_[PORT_CC_SEL_COUNT] = {};
 
     uint32_t sample_rate_   = 44100u;
-    // current_frame_ is uint64_t to prevent wraparound at UINT32_MAX
-    // (~24.9 hours at 48 kHz). It is passed directly to process() without
-    // any narrowing cast.
     uint64_t current_frame_ = 0u;
+
+    // Output capacity bookkeeping (see header comment).
+    uint32_t default_capacity_   = 16384u;  // fallback when host does not pre-set
+    uint32_t host_capacity_      = 0u;      // 0 = not yet learned from host
+    uint32_t last_output_size_   = 0u;      // atom.size we left after last run
 };
 
 } // namespace midi_smooth_cc

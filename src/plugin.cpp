@@ -1,24 +1,15 @@
 // midi-smooth-cc/src/plugin.cpp
-
-// =============================================================================
-// MIDI Smooth CC - LV2 plugin entry-point implementation
 //
-// Exports lv2_descriptor() and implements the standard LV2 lifecycle
-// callbacks: instantiate / connect_port / activate / run / deactivate /
-// cleanup / extension_data.
+// MIDI Smooth CC - LV2 plugin entry-point implementation.
 //
-// 64-BIT FRAME COUNTER:
-//   current_frame_ is uint64_t. In run(), it is passed directly to
-//   midi_processor_.process() without any static_cast<uint32_t>. The
-//   process() method accepts uint64_t. This prevents the frame counter
-//   from wrapping at UINT32_MAX (~24.9 hours at 48 kHz), which would
-//   break all timing and catch-up logic in long-running sessions.
+// Real-time safety (spec §11): no allocation, locks or I/O in run().
+// Parameters are read once at the top of run().
 //
-// Real-time safety (spec §11, Golden Rules 1-3):
-//   1. No dynamic allocation in run(), activate(), or deactivate().
-//   2. Uses the modern LV2 Atom Sequence API.
-//   3. No mutexes. Parameters are read once at the top of run().
-// =============================================================================
+// Host-contract fixes in this revision:
+//   1. atom:Sequence URID is mapped and stamped on the output each cycle
+//      (done inside MidiProcessor::process).
+//   2. The output capacity is learned from the host-provided atom.size.
+//   3. connect_port(nullptr) now disconnects instead of being ignored.
 #include "plugin.hpp"
 
 #include <cstring>
@@ -31,31 +22,30 @@
 
 namespace midi_smooth_cc {
 
-// =============================================================================
-// Constructor
-// =============================================================================
 MidiSmoothCCPlugin::MidiSmoothCCPlugin(double sample_rate,
                                        LV2_URID_Map* urid_map,
                                        uint32_t output_capacity)
     : sample_rate_(sample_rate > 0.0 ? static_cast<uint32_t>(sample_rate) : 44100u)
-    , current_frame_(0u) {
+    , current_frame_(0u)
+    , default_capacity_(output_capacity) {
     if (urid_map != nullptr && urid_map->map != nullptr) {
-        const LV2_URID midi_urid =
-            urid_map->map(urid_map->handle, LV2_MIDI__MidiEvent);
-        midi_processor_.set_midi_urid(midi_urid);
+        midi_processor_.set_midi_urid(
+            urid_map->map(urid_map->handle, LV2_MIDI__MidiEvent));
+        midi_processor_.set_sequence_urid(
+            urid_map->map(urid_map->handle, LV2_ATOM__Sequence));
     }
 
-    midi_processor_.set_output_capacity(output_capacity);
+    midi_processor_.set_output_capacity(default_capacity_);
 }
 
 // =============================================================================
 // connect_port
+//
+// nullptr is a legitimate value: hosts use it to disconnect a port. It MUST
+// be stored (run() null-checks every pointer); ignoring it leaves a dangling
+// pointer that run() would keep writing through.
 // =============================================================================
 void MidiSmoothCCPlugin::connect_port(uint32_t port, void* data) {
-    if (data == nullptr) {
-        return;
-    }
-
     switch (port) {
         case PORT_MIDI_IN:
             port_midi_in_ = static_cast<const LV2_Atom_Sequence*>(data);
@@ -102,11 +92,9 @@ void MidiSmoothCCPlugin::connect_port(uint32_t port, void* data) {
     }
 }
 
-// =============================================================================
-// activate
-// =============================================================================
 void MidiSmoothCCPlugin::activate() {
     current_frame_ = 0u;
+    last_output_size_ = 0u;
 
     for (auto& state : states_) {
         state.last_update_frame = 0u;
@@ -114,13 +102,7 @@ void MidiSmoothCCPlugin::activate() {
 }
 
 // =============================================================================
-// run -- THE CRITICAL REAL-TIME CALLBACK
-//
-// current_frame_ (uint64_t) is passed DIRECTLY to process() without any
-// narrowing cast. This is the key fix for the 64-bit timestamp defect:
-// the previous code executed static_cast<uint32_t>(current_frame_),
-// which discarded the upper 32 bits and caused wraparound after ~24.9
-// hours at 48 kHz.
+// run -- real-time callback
 // =============================================================================
 void MidiSmoothCCPlugin::run(uint32_t n_samples) {
     const auto read_float = [](float* port, float default_val) -> float {
@@ -137,10 +119,8 @@ void MidiSmoothCCPlugin::run(uint32_t n_samples) {
 
     PluginParameters params;
 
-    params.enabled =
-        (read_float(port_enabled_, 1.0f) > 0.5f);
-    params.all_cc =
-        (read_float(port_all_cc_, 0.0f) > 0.5f);
+    params.enabled = (read_float(port_enabled_, 1.0f) > 0.5f);
+    params.all_cc  = (read_float(port_all_cc_, 0.0f) > 0.5f);
 
     {
         const float mode_f = read_float(port_smoothing_mode_, 0.0f);
@@ -167,14 +147,18 @@ void MidiSmoothCCPlugin::run(uint32_t n_samples) {
     }
 
     if (port_midi_in_ != nullptr && port_midi_out_ != nullptr) {
-        // ----------------------------------------------------------------
-        // KEY FIX: Pass current_frame_ directly as uint64_t.
-        // The previous code had:
-        //   static_cast<uint32_t>(current_frame_)
-        // which truncated the upper 32 bits, causing wraparound after
-        // ~24.9 hours at 48 kHz. Now process() accepts uint64_t, and
-        // current_frame_ is passed without any cast.
-        // ----------------------------------------------------------------
+        // Learn the real output capacity. Per the LV2 Atom spec the host sets
+        // the output atom.size to the buffer capacity before run(). A value
+        // equal to what we left after the previous cycle is stale (host did
+        // not reset it) and is ignored.
+        const uint32_t incoming = port_midi_out_->atom.size;
+        if (incoming > sizeof(LV2_Atom_Sequence_Body) &&
+            incoming != last_output_size_) {
+            host_capacity_ = incoming;
+        }
+        midi_processor_.set_output_capacity(
+            host_capacity_ != 0u ? host_capacity_ : default_capacity_);
+
         midi_processor_.process(
             port_midi_in_,
             port_midi_out_,
@@ -183,10 +167,10 @@ void MidiSmoothCCPlugin::run(uint32_t n_samples) {
             n_samples,
             params,
             states_);
+
+        last_output_size_ = port_midi_out_->atom.size;
     }
 
-    // Advance the global frame counter. uint64_t + uint32_t promotes
-    // to uint64_t. No truncation.
     current_frame_ += static_cast<uint64_t>(n_samples);
 }
 
@@ -206,8 +190,8 @@ static LV2_Handle instantiate(const LV2_Descriptor*     descriptor,
     (void)descriptor;
     (void)bundle_path;
 
-    LV2_URID_Map* urid_map       = nullptr;
-    uint32_t      seq_size       = 16384u;
+    LV2_URID_Map* urid_map = nullptr;
+    uint32_t      seq_size = 16384u;
 
     if (features != nullptr) {
         for (const LV2_Feature* const* fp = features; *fp != nullptr; ++fp) {
@@ -238,41 +222,35 @@ static LV2_Handle instantiate(const LV2_Descriptor*     descriptor,
 }
 
 static void connect_port(LV2_Handle instance, uint32_t port, void* data) {
-    auto* plugin =
-        static_cast<midi_smooth_cc::MidiSmoothCCPlugin*>(instance);
+    auto* plugin = static_cast<midi_smooth_cc::MidiSmoothCCPlugin*>(instance);
     if (plugin != nullptr) {
         plugin->connect_port(port, data);
     }
 }
 
 static void activate(LV2_Handle instance) {
-    auto* plugin =
-        static_cast<midi_smooth_cc::MidiSmoothCCPlugin*>(instance);
+    auto* plugin = static_cast<midi_smooth_cc::MidiSmoothCCPlugin*>(instance);
     if (plugin != nullptr) {
         plugin->activate();
     }
 }
 
 static void run(LV2_Handle instance, uint32_t n_samples) {
-    auto* plugin =
-        static_cast<midi_smooth_cc::MidiSmoothCCPlugin*>(instance);
+    auto* plugin = static_cast<midi_smooth_cc::MidiSmoothCCPlugin*>(instance);
     if (plugin != nullptr) {
         plugin->run(n_samples);
     }
 }
 
 static void deactivate(LV2_Handle instance) {
-    auto* plugin =
-        static_cast<midi_smooth_cc::MidiSmoothCCPlugin*>(instance);
+    auto* plugin = static_cast<midi_smooth_cc::MidiSmoothCCPlugin*>(instance);
     if (plugin != nullptr) {
         plugin->deactivate();
     }
 }
 
 static void cleanup(LV2_Handle instance) {
-    auto* plugin =
-        static_cast<midi_smooth_cc::MidiSmoothCCPlugin*>(instance);
-    delete plugin;
+    delete static_cast<midi_smooth_cc::MidiSmoothCCPlugin*>(instance);
 }
 
 static const void* extension_data(const char* uri) {
