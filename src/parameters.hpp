@@ -19,11 +19,18 @@
 //   deadband          = 5
 //   output_rate_hz    = 250
 //   all_cc            = false
-//   channel_mask      = 0xFFFF  (all 16 channels enabled)
+//   all_channels      = false
+//   channel_selection = all 16 channels enabled (indexes 0..15 = true)
 //   cc_selection      = CC7 (index 7) only
 //
-// No dynamic memory allocation: the only container is the fixed-size
-// std::array<bool, 128> for CC selection.
+// Channel selection mirrors the all_cc / cc_selection semantics:
+//   - all_channels=false (default): channel_selection is a whitelist.
+//     Only channels with channel_selection[i]==true are processed.
+//   - all_channels=true: channel_selection is a blacklist.
+//     All channels are processed EXCEPT those with channel_selection[i]==true.
+//
+// No dynamic memory allocation: the only containers are fixed-size
+// std::array<bool, 16> and std::array<bool, 128>.
 // =============================================================================
 #pragma once
 
@@ -45,6 +52,15 @@ namespace midi_smooth_cc {
 inline std::array<bool, 128> default_cc_selection() {
     std::array<bool, 128> sel{};   // value-initialize all entries to false
     sel[7] = true;                 // CC7 enabled by default
+    return sel;
+}
+
+// Returns the default channel selection array: all 16 channels enabled,
+// matching the previous channel_mask = 0xFFFF default. Used as the default
+// value for PluginParameters::channel_selection.
+inline std::array<bool, 16> default_channel_selection() {
+    std::array<bool, 16> sel{};
+    sel.fill(true);   // all 16 channels enabled by default
     return sel;
 }
 
@@ -78,8 +94,15 @@ struct PluginParameters {
     // CC numbers selected in cc_selection are processed (whitelist).
     bool all_cc = false;
 
-    // Bit i (i in 0..15) selects MIDI channel i+1. Default: all 16 channels.
-    uint16_t channel_mask = 0xFFFF;
+    // When true, all MIDI channels are processed unless explicitly disabled
+    // in channel_selection (channel_selection acts as a blacklist). When
+    // false, only the channels selected in channel_selection are processed
+    // (whitelist). Mirrors the all_cc / cc_selection semantics.
+    bool all_channels = false;
+
+    // Per-channel enable flag. Index 0..15 corresponds to MIDI channel 1..16
+    // (user-facing numbering). Default: all 16 channels enabled, per spec §12.
+    std::array<bool, 16> channel_selection = default_channel_selection();
 
     // Per-CC-number enable flag. Index 0..127 corresponds to CC number.
     // Default: only CC7 (index 7) is selected, per Section 12.

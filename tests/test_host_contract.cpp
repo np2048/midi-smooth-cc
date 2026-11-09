@@ -1,4 +1,5 @@
 // midi-smooth-cc/tests/test_host_contract.cpp
+
 //
 // Host-contract regression tests: what a spec-compliant LV2 host (Carla)
 // does that the earlier tests did not replicate.
@@ -6,6 +7,11 @@
 //   2. Host sets output atom.size to the buffer CAPACITY before run(); the
 //      plugin must never write beyond it (no sequenceSize feature given).
 //   3. Hosts disconnect ports with connect_port(nullptr).
+//
+// Updated for Option B: the former PORT_CHANNEL_MASK (single integer) is
+// replaced by PORT_ALL_CHANNELS + PORT_CHANNEL_SEL_BASE..+15. The Host
+// fixture now sets all_channels=0.0 and all 16 channel selectors=1.0,
+// preserving "all channels enabled" behavior.
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
 
@@ -62,7 +68,12 @@ struct Host {
         ctl[MidiSmoothCCPlugin::PORT_RISING_RATE]     = 500.0f;
         ctl[MidiSmoothCCPlugin::PORT_FALLING_RATE]    = 500.0f;
         ctl[MidiSmoothCCPlugin::PORT_OUTPUT_RATE_HZ]  = 100.0f;
-        ctl[MidiSmoothCCPlugin::PORT_CHANNEL_MASK]    = 65535.0f;
+        ctl[MidiSmoothCCPlugin::PORT_ALL_CC]          = 0.0f;
+        ctl[MidiSmoothCCPlugin::PORT_ALL_CHANNELS]    = 0.0f;
+        // All 16 channel selectors = 1.0 (all channels enabled).
+        for (uint32_t i = 0; i < MidiSmoothCCPlugin::PORT_CHANNEL_SEL_COUNT; ++i) {
+            ctl[MidiSmoothCCPlugin::PORT_CHANNEL_SEL_BASE + i] = 1.0f;
+        }
         ctl[MidiSmoothCCPlugin::PORT_CC_SEL_BASE + 7] = 1.0f;
 
         d = lv2_descriptor(0);

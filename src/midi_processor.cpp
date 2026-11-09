@@ -1,4 +1,5 @@
 // midi-smooth-cc/src/midi_processor.cpp
+
 //
 // MIDI Smooth CC - MIDI event processing implementation
 //
@@ -11,6 +12,12 @@
 //   5. append_passthrough_event() - copy an event unchanged.
 //
 // All absolute frame values are uint64_t (no wrap at ~24.9 h @ 48 kHz).
+//
+// Channel selection (Option B): is_channel_selected() now takes the
+// all_channels boolean and the 16-element channel_selection array,
+// mirroring is_cc_selected(). The call sites in process() and
+// emit_output_events_until() pass params.all_channels and
+// params.channel_selection instead of the former params.channel_mask.
 #include "midi_processor.hpp"
 
 #include <algorithm>
@@ -76,7 +83,9 @@ void MidiProcessor::process(const LV2_Atom_Sequence* input,
                 const uint8_t value   = midi_bytes[2];
 
                 const bool ch_sel =
-                    is_channel_selected(channel, params.channel_mask);
+                    is_channel_selected(channel,
+                                        params.all_channels,
+                                        params.channel_selection);
                 const bool cc_sel =
                     is_cc_selected(cc_num, params.all_cc, params.cc_selection);
 
@@ -150,6 +159,9 @@ void MidiProcessor::handle_selected_cc(uint8_t value,
 //
 // Compute/commit: the next value is computed without mutating state; the
 // event is appended; state is committed only if the append succeeded.
+//
+// Channel iteration now uses is_channel_selected(ch, all_channels,
+// channel_selection) instead of the former bitmask check.
 // =============================================================================
 void MidiProcessor::emit_output_events_until(LV2_Atom_Sequence* output,
                                              uint32_t sample_rate,
@@ -178,7 +190,9 @@ void MidiProcessor::emit_output_events_until(LV2_Atom_Sequence* output,
     constexpr double kMaxDtSeconds = 0.2;
 
     for (uint16_t ch = 0u; ch < 16u; ++ch) {
-        if (!is_channel_selected(static_cast<uint8_t>(ch), params.channel_mask)) {
+        if (!is_channel_selected(static_cast<uint8_t>(ch),
+                                 params.all_channels,
+                                 params.channel_selection)) {
             continue;
         }
         for (int cc = 0; cc < 128; ++cc) {

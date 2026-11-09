@@ -65,6 +65,7 @@ using midi_smooth_cc::MidiProcessor;
 using midi_smooth_cc::PluginParameters;
 using midi_smooth_cc::SmoothingMode;
 using midi_smooth_cc::default_cc_selection;
+using midi_smooth_cc::default_channel_selection;
 
 namespace {
 
@@ -104,7 +105,8 @@ public:
         params_.deadband        = 0;
         params_.output_rate_hz  = 100;
         params_.all_cc          = false;
-        params_.channel_mask    = 0xFFFF;
+        params_.all_channels    = false;
+        params_.channel_selection = default_channel_selection();
         params_.cc_selection    = default_cc_selection();
     }
 

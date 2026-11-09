@@ -1,4 +1,5 @@
 // midi-smooth-cc/src/midi_processor.hpp
+
 //
 // MIDI Smooth CC - MIDI event parsing, dispatch, and output generation
 // (spec §8, §9, §10, §11). See midi_processor.cpp for the algorithm notes.
@@ -12,6 +13,12 @@
 //
 // 64-bit frame timestamps: all absolute positions are uint64_t; block-relative
 // offsets (ev->time.frames) stay uint32_t per the LV2 specification.
+//
+// Channel selection (Option B refactor): the previous single channel_mask
+// uint16_t has been replaced by an all_channels boolean plus a 16-element
+// channel_selection array, mirroring the all_cc / cc_selection semantics.
+//   - all_channels=false: channel_selection is a whitelist.
+//   - all_channels=true:  channel_selection is a blacklist.
 #pragma once
 
 #include <array>
@@ -51,8 +58,15 @@ public:
                  std::array<FilterState, 2048>& states);
 
 private:
-    static bool is_channel_selected(uint8_t channel, uint16_t mask) noexcept {
-        return (mask >> channel) & 1u;
+    // Channel selection logic mirroring is_cc_selected:
+    //   all_channels=false → whitelist: channel_selection[channel]==true means
+    //     "process this channel".
+    //   all_channels=true  → blacklist: channel_selection[channel]==true means
+    //     "exclude this channel".
+    static bool is_channel_selected(uint8_t channel,
+                                    bool all_channels,
+                                    const std::array<bool, 16>& sel) noexcept {
+        return all_channels ? !sel[channel] : sel[channel];
     }
 
     static bool is_cc_selected(uint8_t cc,

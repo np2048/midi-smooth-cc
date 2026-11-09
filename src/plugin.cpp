@@ -1,4 +1,5 @@
 // midi-smooth-cc/src/plugin.cpp
+
 //
 // MIDI Smooth CC - LV2 plugin entry-point implementation.
 //
@@ -10,6 +11,11 @@
 //      (done inside MidiProcessor::process).
 //   2. The output capacity is learned from the host-provided atom.size.
 //   3. connect_port(nullptr) now disconnects instead of being ignored.
+//
+// Channel selection (Option B): the former single port_channel_mask_ float*
+// has been replaced by port_all_channels_ plus port_channel_selection_[16].
+// run() builds params.channel_selection from the 16 toggle ports, and
+// params.all_channels from the master toggle, mirroring the all_cc path.
 #include "plugin.hpp"
 
 #include <cstring>
@@ -44,6 +50,11 @@ MidiSmoothCCPlugin::MidiSmoothCCPlugin(double sample_rate,
 // nullptr is a legitimate value: hosts use it to disconnect a port. It MUST
 // be stored (run() null-checks every pointer); ignoring it leaves a dangling
 // pointer that run() would keep writing through.
+//
+// Port ranges:
+//   0..11  : scalar / master-toggle ports (handled by named cases).
+//   12..27 : channel_1 .. channel_16 individual toggles.
+//   28..155: cc_selection_0 .. cc_selection_127 individual toggles.
 // =============================================================================
 void MidiSmoothCCPlugin::connect_port(uint32_t port, void* data) {
     switch (port) {
@@ -80,11 +91,14 @@ void MidiSmoothCCPlugin::connect_port(uint32_t port, void* data) {
         case PORT_ALL_CC:
             port_all_cc_ = static_cast<float*>(data);
             break;
-        case PORT_CHANNEL_MASK:
-            port_channel_mask_ = static_cast<float*>(data);
+        case PORT_ALL_CHANNELS:
+            port_all_channels_ = static_cast<float*>(data);
             break;
         default:
-            if (port >= PORT_CC_SEL_BASE && port < PORT_TOTAL) {
+            if (port >= PORT_CHANNEL_SEL_BASE && port < PORT_CC_SEL_BASE) {
+                port_channel_selection_[port - PORT_CHANNEL_SEL_BASE] =
+                    static_cast<float*>(data);
+            } else if (port >= PORT_CC_SEL_BASE && port < PORT_TOTAL) {
                 port_cc_selection_[port - PORT_CC_SEL_BASE] =
                     static_cast<float*>(data);
             }
@@ -121,6 +135,7 @@ void MidiSmoothCCPlugin::run(uint32_t n_samples) {
 
     params.enabled = (read_float(port_enabled_, 1.0f) > 0.5f);
     params.all_cc  = (read_float(port_all_cc_, 0.0f) > 0.5f);
+    params.all_channels = (read_float(port_all_channels_, 0.0f) > 0.5f);
 
     {
         const float mode_f = read_float(port_smoothing_mode_, 0.0f);
@@ -135,9 +150,13 @@ void MidiSmoothCCPlugin::run(uint32_t n_samples) {
     params.deadband       = clamp_u32(read_float(port_deadband_,         5.0f),   0u,    20u);
     params.output_rate_hz = clamp_u32(read_float(port_output_rate_hz_, 250.0f),  10u,   500u);
 
-    {
-        const float mask_f = read_float(port_channel_mask_, 65535.0f);
-        params.channel_mask = static_cast<uint16_t>(mask_f);
+    // Read the 16 per-channel toggles. Default 1.0 (all channels on) so
+    // that an unconnected port preserves the previous channel_mask=0xFFFF
+    // default behavior.
+    for (uint32_t i = 0u; i < PORT_CHANNEL_SEL_COUNT; ++i) {
+        const float default_val = 1.0f;
+        params.channel_selection[i] =
+            (read_float(port_channel_selection_[i], default_val) > 0.5f);
     }
 
     for (uint32_t i = 0u; i < PORT_CC_SEL_COUNT; ++i) {

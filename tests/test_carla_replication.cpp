@@ -18,12 +18,12 @@
 //   6. Output atom.type left unset to test if the plugin sets it.
 //   7. Null control ports to test default-value fallback.
 //
-// The plugin constructor hardcodes:
-//     midi_processor_.set_output_capacity(16384u);
-// If Carla allocates a buffer smaller than 16384 bytes, the capacity
-// passed to lv2_atom_sequence_append_event exceeds the actual buffer,
-// potentially causing silent memory corruption that makes the output
-// appear empty to the host.
+// Updated for Option B channel refactor:
+//   The former PORT_CHANNEL_MASK (single integer port) has been replaced by
+//   PORT_ALL_CHANNELS (toggle) plus PORT_CHANNEL_SEL_BASE..PORT_CHANNEL_SEL_BASE+15
+//   (16 individual toggles). CarlaDefaults now sets all_channels=0.0 and all
+//   16 channel selectors to 1.0, preserving the previous "all channels on"
+//   default behavior.
 // =============================================================================
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
@@ -78,6 +78,10 @@ struct CarlaUridMap {
 
 // =============================================================================
 // Carla exact default parameter values.
+//
+// Updated for Option B: the former channel_mask=65535.0f is replaced by
+// all_channels=0.0f (whitelist mode) plus all 16 channel selectors = 1.0f
+// (all channels enabled), which is functionally equivalent.
 // =============================================================================
 
 struct CarlaDefaults {
@@ -95,8 +99,13 @@ struct CarlaDefaults {
         values[MidiSmoothCCPlugin::PORT_FALLING_RATE]   = 500.0f;
         values[MidiSmoothCCPlugin::PORT_DEADBAND]       = 0.0f;
         values[MidiSmoothCCPlugin::PORT_OUTPUT_RATE_HZ] = 100.0f;   // Carla default, NOT 1000
-        values[MidiSmoothCCPlugin::PORT_ALL_CC]         = 0.0f;     // false
-        values[MidiSmoothCCPlugin::PORT_CHANNEL_MASK]   = 65535.0f; // all channels
+        values[MidiSmoothCCPlugin::PORT_ALL_CC]         = 0.0f;     // false (whitelist)
+        values[MidiSmoothCCPlugin::PORT_ALL_CHANNELS]   = 0.0f;     // false (whitelist)
+
+        // All 16 channel selectors = 1.0 (all channels enabled).
+        for (uint32_t i = 0; i < MidiSmoothCCPlugin::PORT_CHANNEL_SEL_COUNT; ++i) {
+            values[MidiSmoothCCPlugin::PORT_CHANNEL_SEL_BASE + i] = 1.0f;
+        }
 
         // CC Selection 7 = 1.0 (enabled), all others 0.0.
         values[MidiSmoothCCPlugin::PORT_CC_SEL_BASE + 7] = 1.0f;
@@ -430,7 +439,7 @@ TEST_CASE("Plugin uses safe defaults when control ports are not connected (null)
     output_seq->atom.type = 0;
     output_seq->atom.size = sizeof(LV2_Atom_Sequence_Body);
 
-    // Connect ONLY MIDI ports — all 138 control ports remain null.
+    // Connect ONLY MIDI ports — all 154 control ports remain null.
     descriptor->connect_port(handle, MidiSmoothCCPlugin::PORT_MIDI_IN,  input_seq);
     descriptor->connect_port(handle, MidiSmoothCCPlugin::PORT_MIDI_OUT, output_seq);
 

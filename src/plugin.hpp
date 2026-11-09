@@ -1,11 +1,29 @@
 // midi-smooth-cc/src/plugin.hpp
+
 //
 // MIDI Smooth CC - LV2 plugin entry-point class.
 //
 // Port layout (must match lv2/plugin.ttl.in):
-//   0 MIDI in, 1 MIDI out, 2 enabled, 3 smoothing_mode, 4 attack_ms,
-//   5 release_ms, 6 rising_rate, 7 falling_rate, 8 deadband,
-//   9 output_rate_hz, 10 all_cc, 11 channel_mask, 12..139 cc_selection[0..127]
+//   0  MIDI in
+//   1  MIDI out
+//   2  enabled / bypass
+//   3  smoothing_mode
+//   4  attack_ms
+//   5  release_ms
+//   6  rising_rate
+//   7  falling_rate
+//   8  deadband
+//   9  output_rate_hz
+//   10 all_cc
+//   11 all_channels
+//   12..27  channel_1 .. channel_16   (16 individual toggle ports)
+//   28..155 cc_selection_0 .. cc_selection_127  (128 individual toggle ports)
+//
+// The previous single channel_mask integer port (old port 11) has been
+// replaced by all_channels (port 11) plus 16 per-channel toggle ports
+// (ports 12..27). This mirrors the all_cc / cc_selection design and lets
+// hosts render each channel as a checkbox rather than requiring the user
+// to compute a 16-bit bitmask.
 //
 // Output capacity handling (host-contract fix):
 //   A spec-compliant host sets the output atom.size to the buffer CAPACITY
@@ -46,21 +64,24 @@ public:
     void run(uint32_t n_samples);
     void deactivate() {}
 
-    static constexpr uint32_t PORT_MIDI_IN         = 0u;
-    static constexpr uint32_t PORT_MIDI_OUT        = 1u;
-    static constexpr uint32_t PORT_ENABLED         = 2u;
-    static constexpr uint32_t PORT_SMOOTHING_MODE  = 3u;
-    static constexpr uint32_t PORT_ATTACK_MS       = 4u;
-    static constexpr uint32_t PORT_RELEASE_MS      = 5u;
-    static constexpr uint32_t PORT_RISING_RATE     = 6u;
-    static constexpr uint32_t PORT_FALLING_RATE    = 7u;
-    static constexpr uint32_t PORT_DEADBAND        = 8u;
-    static constexpr uint32_t PORT_OUTPUT_RATE_HZ  = 9u;
-    static constexpr uint32_t PORT_ALL_CC          = 10u;
-    static constexpr uint32_t PORT_CHANNEL_MASK    = 11u;
-    static constexpr uint32_t PORT_CC_SEL_BASE     = 12u;
-    static constexpr uint32_t PORT_CC_SEL_COUNT    = 128u;
-    static constexpr uint32_t PORT_TOTAL           = PORT_CC_SEL_BASE + PORT_CC_SEL_COUNT; // 140
+    // ---- Port index constants (must match lv2/plugin.ttl.in) ----
+    static constexpr uint32_t PORT_MIDI_IN          = 0u;
+    static constexpr uint32_t PORT_MIDI_OUT         = 1u;
+    static constexpr uint32_t PORT_ENABLED          = 2u;
+    static constexpr uint32_t PORT_SMOOTHING_MODE   = 3u;
+    static constexpr uint32_t PORT_ATTACK_MS        = 4u;
+    static constexpr uint32_t PORT_RELEASE_MS       = 5u;
+    static constexpr uint32_t PORT_RISING_RATE      = 6u;
+    static constexpr uint32_t PORT_FALLING_RATE     = 7u;
+    static constexpr uint32_t PORT_DEADBAND         = 8u;
+    static constexpr uint32_t PORT_OUTPUT_RATE_HZ   = 9u;
+    static constexpr uint32_t PORT_ALL_CC           = 10u;
+    static constexpr uint32_t PORT_ALL_CHANNELS     = 11u;
+    static constexpr uint32_t PORT_CHANNEL_SEL_BASE  = 12u;
+    static constexpr uint32_t PORT_CHANNEL_SEL_COUNT = 16u;
+    static constexpr uint32_t PORT_CC_SEL_BASE      = 28u;
+    static constexpr uint32_t PORT_CC_SEL_COUNT     = 128u;
+    static constexpr uint32_t PORT_TOTAL            = PORT_CC_SEL_BASE + PORT_CC_SEL_COUNT; // 156
 
 private:
     MidiProcessor                 midi_processor_;
@@ -78,8 +99,9 @@ private:
     float* port_deadband_        = nullptr;
     float* port_output_rate_hz_  = nullptr;
     float* port_all_cc_          = nullptr;
-    float* port_channel_mask_    = nullptr;
+    float* port_all_channels_    = nullptr;
 
+    float* port_channel_selection_[PORT_CHANNEL_SEL_COUNT] = {};
     float* port_cc_selection_[PORT_CC_SEL_COUNT] = {};
 
     uint32_t sample_rate_   = 44100u;

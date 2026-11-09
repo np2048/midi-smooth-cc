@@ -14,6 +14,9 @@
 // feature with deliberately small values to verify the plugin respects
 // the actual buffer size and never writes beyond it.
 //
+// Updated for Option B: ControlPortValues now sets all_channels=0.0 and
+// all 16 channel selectors=1.0 instead of the former channel_mask=65535.0f.
+//
 // LV2 struct size reference:
 //   sizeof(LV2_Atom)                = 8   (uint32_t type + uint32_t size)
 //   sizeof(LV2_Atom_Sequence_Body)  = varies (4, 8, or 16 depending on
@@ -139,6 +142,10 @@ std::vector<OutputEvent> read_output_events(const LV2_Atom_Sequence* seq) {
 
 // =============================================================================
 // Control port value array
+//
+// Updated for Option B: the former PORT_CHANNEL_MASK = 65535.0f is replaced
+// by PORT_ALL_CHANNELS = 0.0f (whitelist) plus all 16 channel selectors =
+// 1.0f (all channels enabled).
 // =============================================================================
 
 struct ControlPortValues {
@@ -156,7 +163,11 @@ struct ControlPortValues {
         values[MidiSmoothCCPlugin::PORT_DEADBAND]       = 0.0f;
         values[MidiSmoothCCPlugin::PORT_OUTPUT_RATE_HZ] = 1000.0f;
         values[MidiSmoothCCPlugin::PORT_ALL_CC]         = 0.0f;
-        values[MidiSmoothCCPlugin::PORT_CHANNEL_MASK]   = 65535.0f;
+        values[MidiSmoothCCPlugin::PORT_ALL_CHANNELS]   = 0.0f;
+        // All 16 channel selectors = 1.0 (all channels enabled).
+        for (uint32_t i = 0; i < MidiSmoothCCPlugin::PORT_CHANNEL_SEL_COUNT; ++i) {
+            values[MidiSmoothCCPlugin::PORT_CHANNEL_SEL_BASE + i] = 1.0f;
+        }
         values[MidiSmoothCCPlugin::PORT_CC_SEL_BASE + 7] = 1.0f;
     }
 

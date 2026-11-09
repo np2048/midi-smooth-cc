@@ -7,29 +7,26 @@
 # directory. CMake substitutes @MIDI_SMOOTH_CC_URI@ with
 # "urn:midi-smooth-cc:plugin".
 #
-# This file declares:
-#   - The plugin URI and type (lv2:Plugin, lv2:MIDIPlugin, lv2:UtilityPlugin).
-#   - Required features (urid:map) and optional features (hardRTCapable).
-#   - All 140 ports, with indices 0..139 matching src/plugin.hpp exactly:
-#       0     : MIDI Input   (atom:Sequence, InputPort)
-#       1     : MIDI Output  (atom:Sequence, OutputPort)
-#       2     : enabled / bypass (lv2:toggled)
-#       3     : smoothing_mode (enumeration: Exponential=0, Slew=1)
-#       4     : attack_ms        (1..1000 ms)
-#       5     : release_ms       (1..1000 ms)
-#       6     : rising_rate      (1..10000 CC/s)
-#       7     : falling_rate     (1..10000 CC/s)
-#       8     : deadband         (0..20)
-#       9     : output_rate_hz   (10..500 Hz)
-#       10    : all_cc           (lv2:toggled boolean: 0=whitelist, 1=all)
-#       11    : channel_mask     (0..65535 bitmask, integer)
-#       12-139: cc_selection_0 .. cc_selection_127 (128 lv2:toggled booleans)
-#               Each port's lv2:name uses the descriptive MIDI-spec label
-#               for its CC number (e.g. port 19 / CC 7 = "Volume - CC 7").
-#               Port index N (12..139) corresponds to CC number N-12.
-#               The lv2:symbol "cc_selection_N" is preserved unchanged for
-#               preset/state compatibility; only the human-readable
-#               lv2:name is descriptive.
+# Port layout (156 ports total, indices 0..155):
+#   0       : MIDI Input   (atom:Sequence, InputPort)
+#   1       : MIDI Output  (atom:Sequence, OutputPort)
+#   2       : enabled / bypass (lv2:toggled)
+#   3       : smoothing_mode (enumeration: Exponential=0, Slew=1)
+#   4       : attack_ms        (1..1000 ms)
+#   5       : release_ms       (1..1000 ms)
+#   6       : rising_rate      (1..10000 CC/s)
+#   7       : falling_rate     (1..10000 CC/s)
+#   8       : deadband         (0..20)
+#   9       : output_rate_hz   (10..500 Hz)
+#   10      : all_cc           (lv2:toggled: 0=whitelist, 1=all CCs)
+#   11      : all_channels     (lv2:toggled: 0=whitelist, 1=all channels)
+#   12..27  : channel_1 .. channel_16 (16 lv2:toggled booleans)
+#             Port index 12+i corresponds to MIDI channel i+1.
+#             Default 1.0 (all on) to preserve previous channel_mask=0xFFFF.
+#   28..155 : cc_selection_0 .. cc_selection_127 (128 lv2:toggled booleans)
+#             Each port's lv2:name uses the descriptive MIDI-spec label.
+#             Port index 28+i corresponds to CC number i.
+#             Default 0.0 for all except cc_selection_7 (port 35) = 1.0.
 #
 # All control ports declare lv2:connectionOptional so the host may omit
 # any control port; the plugin uses internal defaults for unconnected
@@ -94,12 +91,6 @@ independent filter state for every (channel, CC number) pair.""" ;
 
         # -----------------------------------------------------------------
         # Port 2: enabled / bypass (master bypass toggle)
-        #
-        # Declared lv2:toggled so LV2 hosts render this as a binary On/Off
-        # switch or checkbox rather than a continuous float slider. The
-        # C++ processing logic in src/plugin.cpp already interprets the
-        # value as a boolean threshold (value > 0.5f = ON), so this is
-        # purely a UI-hint metadata change. Range stays 0.0..1.0.
         # -----------------------------------------------------------------
         a lv2:InputPort, lv2:ControlPort ;
         lv2:index 2 ;
@@ -226,15 +217,9 @@ independent filter state for every (channel, CC number) pair.""" ;
         # -----------------------------------------------------------------
         # Port 10: all_cc (boolean toggle: process all CC numbers)
         #
-        # Declared lv2:toggled so LV2 hosts render this as a checkbox or
-        # toggle button rather than a continuous float slider. The value
-        # is interpreted as a boolean (value > 0.5f = true) by
-        # src/plugin.cpp run().
-        #
-        # When false (0.0): cc_selection acts as a whitelist — only CC
-        #   numbers with cc_selection[i]==true are processed.
-        # When true (1.0): cc_selection acts as a blacklist — all CC
-        #   numbers are processed EXCEPT those with cc_selection[i]==true.
+        # Declared lv2:toggled so LV2 hosts render this as a checkbox.
+        # When false (0.0, default): cc_selection is a whitelist.
+        # When true (1.0): cc_selection is a blacklist.
         # -----------------------------------------------------------------
         a lv2:InputPort, lv2:ControlPort ;
         lv2:index 10 ;
@@ -249,48 +234,96 @@ independent filter state for every (channel, CC number) pair.""" ;
     ] , [
 
         # -----------------------------------------------------------------
-        # Port 11: channel_mask (16-bit bitmask, integer)
-        # Bit i selects channel i+1. Default 65535 = 0xFFFF = all channels.
+        # Port 11: all_channels (boolean toggle: process all MIDI channels)
+        #
+        # Mirrors the all_cc / cc_selection semantics for MIDI channels.
+        # When false (0.0, default): channel_selection is a whitelist —
+        #   only channels with channel_selection[i]==true are processed.
+        # When true (1.0): channel_selection is a blacklist — all channels
+        #   are processed EXCEPT those with channel_selection[i]==true.
         # -----------------------------------------------------------------
         a lv2:InputPort, lv2:ControlPort ;
         lv2:index 11 ;
-        lv2:symbol "channel_mask" ;
-        lv2:name "Channel Mask" ;
-        lv2:default 65535.0 ;
+        lv2:symbol "all_channels" ;
+        lv2:name "All Channels" ;
+        lv2:default 0.0 ;
         lv2:minimum 0.0 ;
-        lv2:maximum 65535.0 ;
-        lv2:portProperty lv2:integer ,
+        lv2:maximum 1.0 ;
+        lv2:portProperty lv2:toggled ,
                          lv2:connectionOptional ;
 
     ] , [
 
         # -----------------------------------------------------------------
-        # Ports 12..139: cc_selection_0 .. cc_selection_127
+        # Ports 12..27: channel_1 .. channel_16
         #
-        # 128 individual toggle ports, one per MIDI CC number. Each is
-        # declared lv2:toggled so LV2 hosts render them as checkboxes or
-        # toggle buttons rather than continuous float sliders. The C++
-        # processing logic interprets each value as a boolean threshold
-        # (value > 0.5f = true).
+        # 16 individual toggle ports, one per MIDI channel. Port index
+        # 12+i corresponds to MIDI channel i+1 (user-facing numbering).
+        # Each is declared lv2:toggled so hosts render them as checkboxes.
         #
-        # Port index N (12..139) corresponds to MIDI CC number N-12.
-        # The lv2:symbol "cc_selection_N" is preserved unchanged for
-        # preset/state compatibility. Only the human-readable lv2:name
-        # is descriptive, using the standard MIDI CC name followed by
-        # the CC number (e.g. "Volume - CC 7"). Unnamed controllers
-        # use the bare label "CC N".
+        # Default 1.0 (enabled) for all 16, preserving the previous
+        # channel_mask=0xFFFF default behavior.
         #
-        # Default is 0.0 (disabled) for all, EXCEPT cc_selection_7
-        # (port index 19, CC 7 = "Volume") which defaults to 1.0
-        # (enabled), matching spec §12.
-        #
-        # In all_cc=false mode (whitelist): cc_selection[i]==true means
-        #   "process CC number i".
-        # In all_cc=true  mode (blacklist): cc_selection[i]==true means
-        #   "exclude CC number i".
+        # In all_channels=false mode (whitelist): channel_selection[i]==true
+        #   means "process channel i+1".
+        # In all_channels=true  mode (blacklist): channel_selection[i]==true
+        #   means "exclude channel i+1".
         # -----------------------------------------------------------------
         a lv2:InputPort, lv2:ControlPort ;
         lv2:index 12 ;
+        lv2:symbol "channel_1" ;
+        lv2:name "Channel 1" ;
+        lv2:default 1.0 ;
+        lv2:minimum 0.0 ;
+        lv2:maximum 1.0 ;
+        lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+
+    ] , [
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 13 ; lv2:symbol "channel_2" ; lv2:name "Channel 2" ; lv2:default 1.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+    ] , [
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 14 ; lv2:symbol "channel_3" ; lv2:name "Channel 3" ; lv2:default 1.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+    ] , [
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 15 ; lv2:symbol "channel_4" ; lv2:name "Channel 4" ; lv2:default 1.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+    ] , [
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 16 ; lv2:symbol "channel_5" ; lv2:name "Channel 5" ; lv2:default 1.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+    ] , [
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 17 ; lv2:symbol "channel_6" ; lv2:name "Channel 6" ; lv2:default 1.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+    ] , [
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 18 ; lv2:symbol "channel_7" ; lv2:name "Channel 7" ; lv2:default 1.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+    ] , [
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 19 ; lv2:symbol "channel_8" ; lv2:name "Channel 8" ; lv2:default 1.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+    ] , [
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 20 ; lv2:symbol "channel_9" ; lv2:name "Channel 9" ; lv2:default 1.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+    ] , [
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 21 ; lv2:symbol "channel_10" ; lv2:name "Channel 10" ; lv2:default 1.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+    ] , [
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 22 ; lv2:symbol "channel_11" ; lv2:name "Channel 11" ; lv2:default 1.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+    ] , [
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 23 ; lv2:symbol "channel_12" ; lv2:name "Channel 12" ; lv2:default 1.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+    ] , [
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 24 ; lv2:symbol "channel_13" ; lv2:name "Channel 13" ; lv2:default 1.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+    ] , [
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 25 ; lv2:symbol "channel_14" ; lv2:name "Channel 14" ; lv2:default 1.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+    ] , [
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 26 ; lv2:symbol "channel_15" ; lv2:name "Channel 15" ; lv2:default 1.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+    ] , [
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 27 ; lv2:symbol "channel_16" ; lv2:name "Channel 16" ; lv2:default 1.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+
+    ] , [
+
+        # -----------------------------------------------------------------
+        # Ports 28..155: cc_selection_0 .. cc_selection_127
+        #
+        # 128 individual toggle ports, one per MIDI CC number. Each is
+        # declared lv2:toggled. Port index 28+i corresponds to CC number i.
+        # The lv2:symbol "cc_selection_N" is preserved for preset/state
+        # compatibility. The lv2:name uses the descriptive MIDI-spec label.
+        #
+        # Default 0.0 for all, EXCEPT cc_selection_7 (port 35, CC 7 =
+        # "Volume") which defaults to 1.0, matching spec §12.
+        # -----------------------------------------------------------------
+        a lv2:InputPort, lv2:ControlPort ;
+        lv2:index 28 ;
         lv2:symbol "cc_selection_0" ;
         lv2:name "Bank Select - CC 0" ;
         lv2:default 0.0 ;
@@ -299,257 +332,257 @@ independent filter state for every (channel, CC number) pair.""" ;
         lv2:portProperty lv2:toggled , lv2:connectionOptional ;
 
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 13 ; lv2:symbol "cc_selection_1" ; lv2:name "Modulation - CC 1" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 29 ; lv2:symbol "cc_selection_1" ; lv2:name "Modulation - CC 1" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 14 ; lv2:symbol "cc_selection_2" ; lv2:name "Breath Controller - CC 2" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 30 ; lv2:symbol "cc_selection_2" ; lv2:name "Breath Controller - CC 2" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 15 ; lv2:symbol "cc_selection_3" ; lv2:name "CC 3" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 31 ; lv2:symbol "cc_selection_3" ; lv2:name "CC 3" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 16 ; lv2:symbol "cc_selection_4" ; lv2:name "Foot Controller - CC 4" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 32 ; lv2:symbol "cc_selection_4" ; lv2:name "Foot Controller - CC 4" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 17 ; lv2:symbol "cc_selection_5" ; lv2:name "Portamento Time - CC 5" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 33 ; lv2:symbol "cc_selection_5" ; lv2:name "Portamento Time - CC 5" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 18 ; lv2:symbol "cc_selection_6" ; lv2:name "Data Entry MSB - CC 6" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 34 ; lv2:symbol "cc_selection_6" ; lv2:name "Data Entry MSB - CC 6" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 19 ; lv2:symbol "cc_selection_7" ; lv2:name "Volume - CC 7" ; lv2:default 1.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 35 ; lv2:symbol "cc_selection_7" ; lv2:name "Volume - CC 7" ; lv2:default 1.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 20 ; lv2:symbol "cc_selection_8" ; lv2:name "Balance - CC 8" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 36 ; lv2:symbol "cc_selection_8" ; lv2:name "Balance - CC 8" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 21 ; lv2:symbol "cc_selection_9" ; lv2:name "CC 9" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 37 ; lv2:symbol "cc_selection_9" ; lv2:name "CC 9" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 22 ; lv2:symbol "cc_selection_10" ; lv2:name "Pan - CC 10" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 38 ; lv2:symbol "cc_selection_10" ; lv2:name "Pan - CC 10" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 23 ; lv2:symbol "cc_selection_11" ; lv2:name "Expression - CC 11" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 39 ; lv2:symbol "cc_selection_11" ; lv2:name "Expression - CC 11" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 24 ; lv2:symbol "cc_selection_12" ; lv2:name "Effect Control 1 - CC 12" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 40 ; lv2:symbol "cc_selection_12" ; lv2:name "Effect Control 1 - CC 12" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 25 ; lv2:symbol "cc_selection_13" ; lv2:name "Effect Control 2 - CC 13" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 41 ; lv2:symbol "cc_selection_13" ; lv2:name "Effect Control 2 - CC 13" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 26 ; lv2:symbol "cc_selection_14" ; lv2:name "CC 14" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 42 ; lv2:symbol "cc_selection_14" ; lv2:name "CC 14" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 27 ; lv2:symbol "cc_selection_15" ; lv2:name "CC 15" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 43 ; lv2:symbol "cc_selection_15" ; lv2:name "CC 15" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 28 ; lv2:symbol "cc_selection_16" ; lv2:name "GP Controller 1 - CC 16" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 44 ; lv2:symbol "cc_selection_16" ; lv2:name "GP Controller 1 - CC 16" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 29 ; lv2:symbol "cc_selection_17" ; lv2:name "GP Controller 2 - CC 17" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 45 ; lv2:symbol "cc_selection_17" ; lv2:name "GP Controller 2 - CC 17" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 30 ; lv2:symbol "cc_selection_18" ; lv2:name "GP Controller 3 - CC 18" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 46 ; lv2:symbol "cc_selection_18" ; lv2:name "GP Controller 3 - CC 18" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 31 ; lv2:symbol "cc_selection_19" ; lv2:name "GP Controller 4 - CC 19" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 47 ; lv2:symbol "cc_selection_19" ; lv2:name "GP Controller 4 - CC 19" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 32 ; lv2:symbol "cc_selection_20" ; lv2:name "CC 20" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 48 ; lv2:symbol "cc_selection_20" ; lv2:name "CC 20" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 33 ; lv2:symbol "cc_selection_21" ; lv2:name "CC 21" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 49 ; lv2:symbol "cc_selection_21" ; lv2:name "CC 21" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 34 ; lv2:symbol "cc_selection_22" ; lv2:name "CC 22" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 50 ; lv2:symbol "cc_selection_22" ; lv2:name "CC 22" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 35 ; lv2:symbol "cc_selection_23" ; lv2:name "CC 23" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 51 ; lv2:symbol "cc_selection_23" ; lv2:name "CC 23" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 36 ; lv2:symbol "cc_selection_24" ; lv2:name "CC 24" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 52 ; lv2:symbol "cc_selection_24" ; lv2:name "CC 24" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 37 ; lv2:symbol "cc_selection_25" ; lv2:name "CC 25" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 53 ; lv2:symbol "cc_selection_25" ; lv2:name "CC 25" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 38 ; lv2:symbol "cc_selection_26" ; lv2:name "CC 26" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 54 ; lv2:symbol "cc_selection_26" ; lv2:name "CC 26" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 39 ; lv2:symbol "cc_selection_27" ; lv2:name "CC 27" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 55 ; lv2:symbol "cc_selection_27" ; lv2:name "CC 27" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 40 ; lv2:symbol "cc_selection_28" ; lv2:name "CC 28" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 56 ; lv2:symbol "cc_selection_28" ; lv2:name "CC 28" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 41 ; lv2:symbol "cc_selection_29" ; lv2:name "CC 29" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 57 ; lv2:symbol "cc_selection_29" ; lv2:name "CC 29" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 42 ; lv2:symbol "cc_selection_30" ; lv2:name "CC 30" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 58 ; lv2:symbol "cc_selection_30" ; lv2:name "CC 30" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 43 ; lv2:symbol "cc_selection_31" ; lv2:name "CC 31" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 59 ; lv2:symbol "cc_selection_31" ; lv2:name "CC 31" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 44 ; lv2:symbol "cc_selection_32" ; lv2:name "Bank Select LSB - CC 32" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 60 ; lv2:symbol "cc_selection_32" ; lv2:name "Bank Select LSB - CC 32" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 45 ; lv2:symbol "cc_selection_33" ; lv2:name "Modulation LSB - CC 33" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 61 ; lv2:symbol "cc_selection_33" ; lv2:name "Modulation LSB - CC 33" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 46 ; lv2:symbol "cc_selection_34" ; lv2:name "Breath Controller LSB - CC 34" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 62 ; lv2:symbol "cc_selection_34" ; lv2:name "Breath Controller LSB - CC 34" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 47 ; lv2:symbol "cc_selection_35" ; lv2:name "CC 35" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 63 ; lv2:symbol "cc_selection_35" ; lv2:name "CC 35" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 48 ; lv2:symbol "cc_selection_36" ; lv2:name "Foot Controller LSB - CC 36" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 64 ; lv2:symbol "cc_selection_36" ; lv2:name "Foot Controller LSB - CC 36" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 49 ; lv2:symbol "cc_selection_37" ; lv2:name "Portamento Time LSB - CC 37" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 65 ; lv2:symbol "cc_selection_37" ; lv2:name "Portamento Time LSB - CC 37" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 50 ; lv2:symbol "cc_selection_38" ; lv2:name "Data Entry LSB - CC 38" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 66 ; lv2:symbol "cc_selection_38" ; lv2:name "Data Entry LSB - CC 38" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 51 ; lv2:symbol "cc_selection_39" ; lv2:name "Volume LSB - CC 39" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 67 ; lv2:symbol "cc_selection_39" ; lv2:name "Volume LSB - CC 39" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 52 ; lv2:symbol "cc_selection_40" ; lv2:name "Balance LSB - CC 40" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 68 ; lv2:symbol "cc_selection_40" ; lv2:name "Balance LSB - CC 40" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 53 ; lv2:symbol "cc_selection_41" ; lv2:name "CC 41" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 69 ; lv2:symbol "cc_selection_41" ; lv2:name "CC 41" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 54 ; lv2:symbol "cc_selection_42" ; lv2:name "Pan LSB - CC 42" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 70 ; lv2:symbol "cc_selection_42" ; lv2:name "Pan LSB - CC 42" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 55 ; lv2:symbol "cc_selection_43" ; lv2:name "Expression LSB - CC 43" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 71 ; lv2:symbol "cc_selection_43" ; lv2:name "Expression LSB - CC 43" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 56 ; lv2:symbol "cc_selection_44" ; lv2:name "Effect Control 1 LSB - CC 44" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 72 ; lv2:symbol "cc_selection_44" ; lv2:name "Effect Control 1 LSB - CC 44" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 57 ; lv2:symbol "cc_selection_45" ; lv2:name "Effect Control 2 LSB - CC 45" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 73 ; lv2:symbol "cc_selection_45" ; lv2:name "Effect Control 2 LSB - CC 45" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 58 ; lv2:symbol "cc_selection_46" ; lv2:name "CC 46" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 74 ; lv2:symbol "cc_selection_46" ; lv2:name "CC 46" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 59 ; lv2:symbol "cc_selection_47" ; lv2:name "CC 47" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 75 ; lv2:symbol "cc_selection_47" ; lv2:name "CC 47" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 60 ; lv2:symbol "cc_selection_48" ; lv2:name "GP Controller 1 LSB - CC 48" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 76 ; lv2:symbol "cc_selection_48" ; lv2:name "GP Controller 1 LSB - CC 48" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 61 ; lv2:symbol "cc_selection_49" ; lv2:name "GP Controller 2 LSB - CC 49" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 77 ; lv2:symbol "cc_selection_49" ; lv2:name "GP Controller 2 LSB - CC 49" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 62 ; lv2:symbol "cc_selection_50" ; lv2:name "GP Controller 3 LSB - CC 50" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 78 ; lv2:symbol "cc_selection_50" ; lv2:name "GP Controller 3 LSB - CC 50" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 63 ; lv2:symbol "cc_selection_51" ; lv2:name "GP Controller 4 LSB - CC 51" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 79 ; lv2:symbol "cc_selection_51" ; lv2:name "GP Controller 4 LSB - CC 51" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 64 ; lv2:symbol "cc_selection_52" ; lv2:name "CC 52" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 80 ; lv2:symbol "cc_selection_52" ; lv2:name "CC 52" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 65 ; lv2:symbol "cc_selection_53" ; lv2:name "CC 53" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 81 ; lv2:symbol "cc_selection_53" ; lv2:name "CC 53" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 66 ; lv2:symbol "cc_selection_54" ; lv2:name "CC 54" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 82 ; lv2:symbol "cc_selection_54" ; lv2:name "CC 54" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 67 ; lv2:symbol "cc_selection_55" ; lv2:name "CC 55" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 83 ; lv2:symbol "cc_selection_55" ; lv2:name "CC 55" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 68 ; lv2:symbol "cc_selection_56" ; lv2:name "CC 56" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 84 ; lv2:symbol "cc_selection_56" ; lv2:name "CC 56" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 69 ; lv2:symbol "cc_selection_57" ; lv2:name "CC 57" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 85 ; lv2:symbol "cc_selection_57" ; lv2:name "CC 57" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 70 ; lv2:symbol "cc_selection_58" ; lv2:name "CC 58" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 86 ; lv2:symbol "cc_selection_58" ; lv2:name "CC 58" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 71 ; lv2:symbol "cc_selection_59" ; lv2:name "CC 59" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 87 ; lv2:symbol "cc_selection_59" ; lv2:name "CC 59" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 72 ; lv2:symbol "cc_selection_60" ; lv2:name "CC 60" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 88 ; lv2:symbol "cc_selection_60" ; lv2:name "CC 60" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 73 ; lv2:symbol "cc_selection_61" ; lv2:name "CC 61" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 89 ; lv2:symbol "cc_selection_61" ; lv2:name "CC 61" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 74 ; lv2:symbol "cc_selection_62" ; lv2:name "CC 62" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 90 ; lv2:symbol "cc_selection_62" ; lv2:name "CC 62" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 75 ; lv2:symbol "cc_selection_63" ; lv2:name "CC 63" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 91 ; lv2:symbol "cc_selection_63" ; lv2:name "CC 63" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 76 ; lv2:symbol "cc_selection_64" ; lv2:name "Sustain - CC 64" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 92 ; lv2:symbol "cc_selection_64" ; lv2:name "Sustain - CC 64" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 77 ; lv2:symbol "cc_selection_65" ; lv2:name "Portamento On/Off - CC 65" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 93 ; lv2:symbol "cc_selection_65" ; lv2:name "Portamento On/Off - CC 65" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 78 ; lv2:symbol "cc_selection_66" ; lv2:name "Sostenuto - CC 66" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 94 ; lv2:symbol "cc_selection_66" ; lv2:name "Sostenuto - CC 66" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 79 ; lv2:symbol "cc_selection_67" ; lv2:name "Soft Pedal - CC 67" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 95 ; lv2:symbol "cc_selection_67" ; lv2:name "Soft Pedal - CC 67" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 80 ; lv2:symbol "cc_selection_68" ; lv2:name "Legato Footswitch - CC 68" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 96 ; lv2:symbol "cc_selection_68" ; lv2:name "Legato Footswitch - CC 68" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 81 ; lv2:symbol "cc_selection_69" ; lv2:name "Hold 2 - CC 69" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 97 ; lv2:symbol "cc_selection_69" ; lv2:name "Hold 2 - CC 69" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 82 ; lv2:symbol "cc_selection_70" ; lv2:name "Sound Variation - CC 70" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 98 ; lv2:symbol "cc_selection_70" ; lv2:name "Sound Variation - CC 70" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 83 ; lv2:symbol "cc_selection_71" ; lv2:name "Timbre - CC 71" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 99 ; lv2:symbol "cc_selection_71" ; lv2:name "Timbre - CC 71" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 84 ; lv2:symbol "cc_selection_72" ; lv2:name "Release Time - CC 72" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 100 ; lv2:symbol "cc_selection_72" ; lv2:name "Release Time - CC 72" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 85 ; lv2:symbol "cc_selection_73" ; lv2:name "Attack Time - CC 73" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 101 ; lv2:symbol "cc_selection_73" ; lv2:name "Attack Time - CC 73" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 86 ; lv2:symbol "cc_selection_74" ; lv2:name "Brightness - CC 74" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 102 ; lv2:symbol "cc_selection_74" ; lv2:name "Brightness - CC 74" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 87 ; lv2:symbol "cc_selection_75" ; lv2:name "Decay Time - CC 75" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 103 ; lv2:symbol "cc_selection_75" ; lv2:name "Decay Time - CC 75" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 88 ; lv2:symbol "cc_selection_76" ; lv2:name "Vibrato Rate - CC 76" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 104 ; lv2:symbol "cc_selection_76" ; lv2:name "Vibrato Rate - CC 76" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 89 ; lv2:symbol "cc_selection_77" ; lv2:name "Vibrato Depth - CC 77" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 105 ; lv2:symbol "cc_selection_77" ; lv2:name "Vibrato Depth - CC 77" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 90 ; lv2:symbol "cc_selection_78" ; lv2:name "Vibrato Delay - CC 78" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 106 ; lv2:symbol "cc_selection_78" ; lv2:name "Vibrato Delay - CC 78" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 91 ; lv2:symbol "cc_selection_79" ; lv2:name "Sound Controller 10 - CC 79" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 107 ; lv2:symbol "cc_selection_79" ; lv2:name "Sound Controller 10 - CC 79" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 92 ; lv2:symbol "cc_selection_80" ; lv2:name "GP Controller 5 - CC 80" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 108 ; lv2:symbol "cc_selection_80" ; lv2:name "GP Controller 5 - CC 80" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 93 ; lv2:symbol "cc_selection_81" ; lv2:name "GP Controller 6 - CC 81" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 109 ; lv2:symbol "cc_selection_81" ; lv2:name "GP Controller 6 - CC 81" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 94 ; lv2:symbol "cc_selection_82" ; lv2:name "GP Controller 7 - CC 82" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 110 ; lv2:symbol "cc_selection_82" ; lv2:name "GP Controller 7 - CC 82" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 95 ; lv2:symbol "cc_selection_83" ; lv2:name "GP Controller 8 - CC 83" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 111 ; lv2:symbol "cc_selection_83" ; lv2:name "GP Controller 8 - CC 83" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 96 ; lv2:symbol "cc_selection_84" ; lv2:name "Portamento Control - CC 84" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 112 ; lv2:symbol "cc_selection_84" ; lv2:name "Portamento Control - CC 84" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 97 ; lv2:symbol "cc_selection_85" ; lv2:name "CC 85" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 113 ; lv2:symbol "cc_selection_85" ; lv2:name "CC 85" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 98 ; lv2:symbol "cc_selection_86" ; lv2:name "CC 86" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 114 ; lv2:symbol "cc_selection_86" ; lv2:name "CC 86" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 99 ; lv2:symbol "cc_selection_87" ; lv2:name "CC 87" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 115 ; lv2:symbol "cc_selection_87" ; lv2:name "CC 87" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 100 ; lv2:symbol "cc_selection_88" ; lv2:name "High Res Velocity - CC 88" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 116 ; lv2:symbol "cc_selection_88" ; lv2:name "High Res Velocity - CC 88" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 101 ; lv2:symbol "cc_selection_89" ; lv2:name "CC 89" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 117 ; lv2:symbol "cc_selection_89" ; lv2:name "CC 89" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 102 ; lv2:symbol "cc_selection_90" ; lv2:name "CC 90" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 118 ; lv2:symbol "cc_selection_90" ; lv2:name "CC 90" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 103 ; lv2:symbol "cc_selection_91" ; lv2:name "Reverb Send - CC 91" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 119 ; lv2:symbol "cc_selection_91" ; lv2:name "Reverb Send - CC 91" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 104 ; lv2:symbol "cc_selection_92" ; lv2:name "Tremolo Depth - CC 92" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 120 ; lv2:symbol "cc_selection_92" ; lv2:name "Tremolo Depth - CC 92" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 105 ; lv2:symbol "cc_selection_93" ; lv2:name "Chorus Send - CC 93" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 121 ; lv2:symbol "cc_selection_93" ; lv2:name "Chorus Send - CC 93" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 106 ; lv2:symbol "cc_selection_94" ; lv2:name "Celeste Depth - CC 94" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 122 ; lv2:symbol "cc_selection_94" ; lv2:name "Celeste Depth - CC 94" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 107 ; lv2:symbol "cc_selection_95" ; lv2:name "Phaser Depth - CC 95" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 123 ; lv2:symbol "cc_selection_95" ; lv2:name "Phaser Depth - CC 95" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 108 ; lv2:symbol "cc_selection_96" ; lv2:name "Data Increment - CC 96" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 124 ; lv2:symbol "cc_selection_96" ; lv2:name "Data Increment - CC 96" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 109 ; lv2:symbol "cc_selection_97" ; lv2:name "Data Decrement - CC 97" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 125 ; lv2:symbol "cc_selection_97" ; lv2:name "Data Decrement - CC 97" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 110 ; lv2:symbol "cc_selection_98" ; lv2:name "NRPN LSB - CC 98" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 126 ; lv2:symbol "cc_selection_98" ; lv2:name "NRPN LSB - CC 98" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 111 ; lv2:symbol "cc_selection_99" ; lv2:name "NRPN MSB - CC 99" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 127 ; lv2:symbol "cc_selection_99" ; lv2:name "NRPN MSB - CC 99" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 112 ; lv2:symbol "cc_selection_100" ; lv2:name "RPN LSB - CC 100" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 128 ; lv2:symbol "cc_selection_100" ; lv2:name "RPN LSB - CC 100" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 113 ; lv2:symbol "cc_selection_101" ; lv2:name "RPN MSB - CC 101" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 129 ; lv2:symbol "cc_selection_101" ; lv2:name "RPN MSB - CC 101" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 114 ; lv2:symbol "cc_selection_102" ; lv2:name "CC 102" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 130 ; lv2:symbol "cc_selection_102" ; lv2:name "CC 102" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 115 ; lv2:symbol "cc_selection_103" ; lv2:name "CC 103" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 131 ; lv2:symbol "cc_selection_103" ; lv2:name "CC 103" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 116 ; lv2:symbol "cc_selection_104" ; lv2:name "CC 104" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 132 ; lv2:symbol "cc_selection_104" ; lv2:name "CC 104" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 117 ; lv2:symbol "cc_selection_105" ; lv2:name "CC 105" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 133 ; lv2:symbol "cc_selection_105" ; lv2:name "CC 105" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 118 ; lv2:symbol "cc_selection_106" ; lv2:name "CC 106" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 134 ; lv2:symbol "cc_selection_106" ; lv2:name "CC 106" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 119 ; lv2:symbol "cc_selection_107" ; lv2:name "CC 107" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 135 ; lv2:symbol "cc_selection_107" ; lv2:name "CC 107" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 120 ; lv2:symbol "cc_selection_108" ; lv2:name "CC 108" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 136 ; lv2:symbol "cc_selection_108" ; lv2:name "CC 108" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 121 ; lv2:symbol "cc_selection_109" ; lv2:name "CC 109" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 137 ; lv2:symbol "cc_selection_109" ; lv2:name "CC 109" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 122 ; lv2:symbol "cc_selection_110" ; lv2:name "CC 110" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 138 ; lv2:symbol "cc_selection_110" ; lv2:name "CC 110" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 123 ; lv2:symbol "cc_selection_111" ; lv2:name "CC 111" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 139 ; lv2:symbol "cc_selection_111" ; lv2:name "CC 111" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 124 ; lv2:symbol "cc_selection_112" ; lv2:name "CC 112" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 140 ; lv2:symbol "cc_selection_112" ; lv2:name "CC 112" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 125 ; lv2:symbol "cc_selection_113" ; lv2:name "CC 113" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 141 ; lv2:symbol "cc_selection_113" ; lv2:name "CC 113" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 126 ; lv2:symbol "cc_selection_114" ; lv2:name "CC 114" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 142 ; lv2:symbol "cc_selection_114" ; lv2:name "CC 114" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 127 ; lv2:symbol "cc_selection_115" ; lv2:name "CC 115" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 143 ; lv2:symbol "cc_selection_115" ; lv2:name "CC 115" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 128 ; lv2:symbol "cc_selection_116" ; lv2:name "CC 116" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 144 ; lv2:symbol "cc_selection_116" ; lv2:name "CC 116" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 129 ; lv2:symbol "cc_selection_117" ; lv2:name "CC 117" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 145 ; lv2:symbol "cc_selection_117" ; lv2:name "CC 117" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 130 ; lv2:symbol "cc_selection_118" ; lv2:name "CC 118" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 146 ; lv2:symbol "cc_selection_118" ; lv2:name "CC 118" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 131 ; lv2:symbol "cc_selection_119" ; lv2:name "CC 119" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 147 ; lv2:symbol "cc_selection_119" ; lv2:name "CC 119" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 132 ; lv2:symbol "cc_selection_120" ; lv2:name "All Sound Off - CC 120" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 148 ; lv2:symbol "cc_selection_120" ; lv2:name "All Sound Off - CC 120" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 133 ; lv2:symbol "cc_selection_121" ; lv2:name "Reset All Controllers - CC 121" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 149 ; lv2:symbol "cc_selection_121" ; lv2:name "Reset All Controllers - CC 121" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 134 ; lv2:symbol "cc_selection_122" ; lv2:name "Local Control On/Off - CC 122" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 150 ; lv2:symbol "cc_selection_122" ; lv2:name "Local Control On/Off - CC 122" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 135 ; lv2:symbol "cc_selection_123" ; lv2:name "All Notes Off - CC 123" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 151 ; lv2:symbol "cc_selection_123" ; lv2:name "All Notes Off - CC 123" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 136 ; lv2:symbol "cc_selection_124" ; lv2:name "Omni Mode Off - CC 124" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 152 ; lv2:symbol "cc_selection_124" ; lv2:name "Omni Mode Off - CC 124" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 137 ; lv2:symbol "cc_selection_125" ; lv2:name "Omni Mode On - CC 125" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 153 ; lv2:symbol "cc_selection_125" ; lv2:name "Omni Mode On - CC 125" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 138 ; lv2:symbol "cc_selection_126" ; lv2:name "Mono Mode On - CC 126" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 154 ; lv2:symbol "cc_selection_126" ; lv2:name "Mono Mode On - CC 126" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 139 ; lv2:symbol "cc_selection_127" ; lv2:name "Poly Mode On - CC 127" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 155 ; lv2:symbol "cc_selection_127" ; lv2:name "Poly Mode On - CC 127" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] .
