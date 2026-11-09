@@ -128,12 +128,12 @@ void MidiSmoothCCPlugin::run(uint32_t n_samples) {
             (mode_f > 0.5f) ? SmoothingMode::Slew : SmoothingMode::Exponential;
     }
 
-    params.attack_ms      = clamp_u32(read_float(port_attack_ms_,       50.0f),   1u,  1000u);
-    params.release_ms     = clamp_u32(read_float(port_release_ms_,     100.0f),   1u,  1000u);
-    params.rising_rate    = clamp_u32(read_float(port_rising_rate_,    500.0f),   1u, 10000u);
+    params.attack_ms      = clamp_u32(read_float(port_attack_ms_,       30.0f),   1u,  1000u);
+    params.release_ms     = clamp_u32(read_float(port_release_ms_,      25.0f),   1u,  1000u);
+    params.rising_rate    = clamp_u32(read_float(port_rising_rate_,    200.0f),   1u, 10000u);
     params.falling_rate   = clamp_u32(read_float(port_falling_rate_,   500.0f),   1u, 10000u);
-    params.deadband       = clamp_u32(read_float(port_deadband_,         0.0f),   0u,    10u);
-    params.output_rate_hz = clamp_u32(read_float(port_output_rate_hz_, 100.0f),  20u,   500u);
+    params.deadband       = clamp_u32(read_float(port_deadband_,         5.0f),   0u,    20u);
+    params.output_rate_hz = clamp_u32(read_float(port_output_rate_hz_, 250.0f),  10u,   500u);
 
     {
         const float mask_f = read_float(port_channel_mask_, 65535.0f);

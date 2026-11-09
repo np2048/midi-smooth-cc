@@ -7,7 +7,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 project(midi_smooth_cc
-    VERSION 1.0.0
+    VERSION 1.0.1
     DESCRIPTION "Real-time MIDI CC smoothing LV2 plugin for breath controllers and EWI"
     LANGUAGES CXX
 )

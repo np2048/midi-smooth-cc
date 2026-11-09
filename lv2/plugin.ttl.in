@@ -19,8 +19,8 @@
 #       5     : release_ms       (1..1000 ms)
 #       6     : rising_rate      (1..10000 CC/s)
 #       7     : falling_rate     (1..10000 CC/s)
-#       8     : deadband         (0..10)
-#       9     : output_rate_hz   (20..500 Hz)
+#       8     : deadband         (0..20)
+#       9     : output_rate_hz   (10..500 Hz)
 #       10    : all_cc
 #       11    : channel_mask     (0..65535 bitmask, integer)
 #       12-139: cc_selection_0 .. cc_selection_127 (128 toggle ports)
@@ -130,7 +130,7 @@ independent filter state for every (channel, CC number) pair.""" ;
         lv2:index 4 ;
         lv2:symbol "attack_ms" ;
         lv2:name "Attack" ;
-        lv2:default 50.0 ;
+        lv2:default 30.0 ;
         lv2:minimum 1.0 ;
         lv2:maximum 1000.0 ;
         lv2:portProperty lv2:connectionOptional ;
@@ -145,7 +145,7 @@ independent filter state for every (channel, CC number) pair.""" ;
         lv2:index 5 ;
         lv2:symbol "release_ms" ;
         lv2:name "Release" ;
-        lv2:default 100.0 ;
+        lv2:default 25.0 ;
         lv2:minimum 1.0 ;
         lv2:maximum 1000.0 ;
         lv2:portProperty lv2:connectionOptional ;
@@ -160,7 +160,7 @@ independent filter state for every (channel, CC number) pair.""" ;
         lv2:index 6 ;
         lv2:symbol "rising_rate" ;
         lv2:name "Rising Rate" ;
-        lv2:default 500.0 ;
+        lv2:default 200.0 ;
         lv2:minimum 1.0 ;
         lv2:maximum 10000.0 ;
         lv2:portProperty lv2:connectionOptional ;
@@ -182,28 +182,28 @@ independent filter state for every (channel, CC number) pair.""" ;
     ] , [
 
         # -----------------------------------------------------------------
-        # Port 8: deadband (0..10 CC units)
+        # Port 8: deadband (0..20 CC units)
         # -----------------------------------------------------------------
         a lv2:InputPort, lv2:ControlPort ;
         lv2:index 8 ;
         lv2:symbol "deadband" ;
         lv2:name "Deadband" ;
-        lv2:default 0.0 ;
+        lv2:default 5.0 ;
         lv2:minimum 0.0 ;
-        lv2:maximum 10.0 ;
+        lv2:maximum 20.0 ;
         lv2:portProperty lv2:connectionOptional ;
 
     ] , [
 
         # -----------------------------------------------------------------
-        # Port 9: output_rate_hz (20..500 Hz)
+        # Port 9: output_rate_hz (10..500 Hz)
         # -----------------------------------------------------------------
         a lv2:InputPort, lv2:ControlPort ;
         lv2:index 9 ;
         lv2:symbol "output_rate_hz" ;
         lv2:name "Output Rate" ;
-        lv2:default 100.0 ;
-        lv2:minimum 20.0 ;
+        lv2:default 250.0 ;
+        lv2:minimum 10.0 ;
         lv2:maximum 500.0 ;
         lv2:portProperty lv2:connectionOptional ;
         units:unit units:Hz ;

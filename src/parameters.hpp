@@ -9,15 +9,15 @@
 // at the top of run() and stores the resulting values into a PluginParameters
 // instance, which is then consulted throughout the real-time processing path.
 //
-// Default values follow Section 12:
+// Default values (fine-tuned for v1.0):
 //   enabled           = true
 //   smoothing_mode    = Exponential
-//   attack_ms         = 50
-//   release_ms        = 100
-//   rising_rate       = 500   (CC/s)
+//   attack_ms         = 30
+//   release_ms        = 25
+//   rising_rate       = 200   (CC/s)
 //   falling_rate      = 500   (CC/s)
-//   deadband          = 0
-//   output_rate_hz    = 100
+//   deadband          = 5
+//   output_rate_hz    = 250
 //   all_cc            = false
 //   channel_mask      = 0xFFFF  (all 16 channels enabled)
 //   cc_selection      = CC7 (index 7) only
@@ -58,20 +58,20 @@ struct PluginParameters {
     SmoothingMode smoothing_mode = SmoothingMode::Exponential;
 
     // Exponential filter time constants (Section 6.1). Range 1..1000 ms.
-    uint32_t attack_ms  = 50;
-    uint32_t release_ms = 100;
+    uint32_t attack_ms  = 30;
+    uint32_t release_ms = 25;
 
     // Slew rate limiter caps (Section 6.2). Range 1..10000 CC units/sec.
-    uint32_t rising_rate  = 500;
+    uint32_t rising_rate  = 200;
     uint32_t falling_rate = 500;
 
     // Minimum |new_target - current_filtered| required to accept a target
-    // update (Section 7). Range 0..10 CC units; 0 disables deadband.
-    uint32_t deadband = 0;
+    // update (Section 7). Range 0..20 CC units; 0 disables deadband.
+    uint32_t deadband = 5;
 
     // Rate at which intermediate CC events are emitted on the output port
-    // (Section 8). Range 20..500 Hz.
-    uint32_t output_rate_hz = 100;
+    // (Section 8). Range 10..500 Hz.
+    uint32_t output_rate_hz = 250;
 
     // When true, all CC numbers are processed unless explicitly disabled in
     // cc_selection (cc_selection acts as a blacklist). When false, only the
