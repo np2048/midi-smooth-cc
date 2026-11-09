@@ -20,9 +20,10 @@
 #   9       : output_rate_hz   (10..500 Hz)
 #   10      : all_cc           (lv2:toggled: 0=whitelist, 1=all CCs)
 #   11      : all_channels     (lv2:toggled: 0=whitelist, 1=all channels)
+#             Default 1.0 (blacklist mode).
 #   12..27  : channel_1 .. channel_16 (16 lv2:toggled booleans)
 #             Port index 12+i corresponds to MIDI channel i+1.
-#             Default 1.0 (all on) to preserve previous channel_mask=0xFFFF.
+#             Default 1.0 for channel_1 (port 12), 0.0 for channels 2-16.
 #   28..155 : cc_selection_0 .. cc_selection_127 (128 lv2:toggled booleans)
 #             Each port's lv2:name uses the descriptive MIDI-spec label.
 #             Port index 28+i corresponds to CC number i.
@@ -217,7 +218,6 @@ independent filter state for every (channel, CC number) pair.""" ;
         # -----------------------------------------------------------------
         # Port 10: all_cc (boolean toggle: process all CC numbers)
         #
-        # Declared lv2:toggled so LV2 hosts render this as a checkbox.
         # When false (0.0, default): cc_selection is a whitelist.
         # When true (1.0): cc_selection is a blacklist.
         # -----------------------------------------------------------------
@@ -237,16 +237,17 @@ independent filter state for every (channel, CC number) pair.""" ;
         # Port 11: all_channels (boolean toggle: process all MIDI channels)
         #
         # Mirrors the all_cc / cc_selection semantics for MIDI channels.
-        # When false (0.0, default): channel_selection is a whitelist —
-        #   only channels with channel_selection[i]==true are processed.
-        # When true (1.0): channel_selection is a blacklist — all channels
-        #   are processed EXCEPT those with channel_selection[i]==true.
+        # When false (0.0): channel_selection is a whitelist — only
+        #   channels with channel_selection[i]==true are processed.
+        # When true (1.0, default): channel_selection is a blacklist —
+        #   all channels are processed EXCEPT those with
+        #   channel_selection[i]==true.
         # -----------------------------------------------------------------
         a lv2:InputPort, lv2:ControlPort ;
         lv2:index 11 ;
         lv2:symbol "all_channels" ;
         lv2:name "All Channels" ;
-        lv2:default 0.0 ;
+        lv2:default 1.0 ;
         lv2:minimum 0.0 ;
         lv2:maximum 1.0 ;
         lv2:portProperty lv2:toggled ,
@@ -261,8 +262,10 @@ independent filter state for every (channel, CC number) pair.""" ;
         # 12+i corresponds to MIDI channel i+1 (user-facing numbering).
         # Each is declared lv2:toggled so hosts render them as checkboxes.
         #
-        # Default 1.0 (enabled) for all 16, preserving the previous
-        # channel_mask=0xFFFF default behavior.
+        # Default 1.0 for channel_1 (port 12), 0.0 for channels 2-16.
+        # Combined with all_channels=true (blacklist mode, port 11
+        # default), Channel 1 is excluded and channels 2-16 are
+        # processed by default.
         #
         # In all_channels=false mode (whitelist): channel_selection[i]==true
         #   means "process channel i+1".
@@ -279,35 +282,35 @@ independent filter state for every (channel, CC number) pair.""" ;
         lv2:portProperty lv2:toggled , lv2:connectionOptional ;
 
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 13 ; lv2:symbol "channel_2" ; lv2:name "Channel 2" ; lv2:default 1.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 13 ; lv2:symbol "channel_2" ; lv2:name "Channel 2" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 14 ; lv2:symbol "channel_3" ; lv2:name "Channel 3" ; lv2:default 1.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 14 ; lv2:symbol "channel_3" ; lv2:name "Channel 3" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 15 ; lv2:symbol "channel_4" ; lv2:name "Channel 4" ; lv2:default 1.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 15 ; lv2:symbol "channel_4" ; lv2:name "Channel 4" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 16 ; lv2:symbol "channel_5" ; lv2:name "Channel 5" ; lv2:default 1.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 16 ; lv2:symbol "channel_5" ; lv2:name "Channel 5" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 17 ; lv2:symbol "channel_6" ; lv2:name "Channel 6" ; lv2:default 1.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 17 ; lv2:symbol "channel_6" ; lv2:name "Channel 6" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 18 ; lv2:symbol "channel_7" ; lv2:name "Channel 7" ; lv2:default 1.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 18 ; lv2:symbol "channel_7" ; lv2:name "Channel 7" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 19 ; lv2:symbol "channel_8" ; lv2:name "Channel 8" ; lv2:default 1.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 19 ; lv2:symbol "channel_8" ; lv2:name "Channel 8" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 20 ; lv2:symbol "channel_9" ; lv2:name "Channel 9" ; lv2:default 1.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 20 ; lv2:symbol "channel_9" ; lv2:name "Channel 9" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 21 ; lv2:symbol "channel_10" ; lv2:name "Channel 10" ; lv2:default 1.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 21 ; lv2:symbol "channel_10" ; lv2:name "Channel 10" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 22 ; lv2:symbol "channel_11" ; lv2:name "Channel 11" ; lv2:default 1.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 22 ; lv2:symbol "channel_11" ; lv2:name "Channel 11" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 23 ; lv2:symbol "channel_12" ; lv2:name "Channel 12" ; lv2:default 1.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 23 ; lv2:symbol "channel_12" ; lv2:name "Channel 12" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 24 ; lv2:symbol "channel_13" ; lv2:name "Channel 13" ; lv2:default 1.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 24 ; lv2:symbol "channel_13" ; lv2:name "Channel 13" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 25 ; lv2:symbol "channel_14" ; lv2:name "Channel 14" ; lv2:default 1.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 25 ; lv2:symbol "channel_14" ; lv2:name "Channel 14" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 26 ; lv2:symbol "channel_15" ; lv2:name "Channel 15" ; lv2:default 1.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 26 ; lv2:symbol "channel_15" ; lv2:name "Channel 15" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
     ] , [
-        a lv2:InputPort, lv2:ControlPort ; lv2:index 27 ; lv2:symbol "channel_16" ; lv2:name "Channel 16" ; lv2:default 1.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
+        a lv2:InputPort, lv2:ControlPort ; lv2:index 27 ; lv2:symbol "channel_16" ; lv2:name "Channel 16" ; lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ; lv2:portProperty lv2:toggled , lv2:connectionOptional ;
 
     ] , [
 

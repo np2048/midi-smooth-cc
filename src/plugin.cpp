@@ -16,6 +16,10 @@
 // has been replaced by port_all_channels_ plus port_channel_selection_[16].
 // run() builds params.channel_selection from the 16 toggle ports, and
 // params.all_channels from the master toggle, mirroring the all_cc path.
+//
+// Defaults: all_channels defaults to 1.0 (blacklist mode), channel_1
+// defaults to 1.0, channels 2-16 default to 0.0. This means Channel 1 is
+// excluded and channels 2-16 are processed by default.
 #include "plugin.hpp"
 
 #include <cstring>
@@ -135,7 +139,8 @@ void MidiSmoothCCPlugin::run(uint32_t n_samples) {
 
     params.enabled = (read_float(port_enabled_, 1.0f) > 0.5f);
     params.all_cc  = (read_float(port_all_cc_, 0.0f) > 0.5f);
-    params.all_channels = (read_float(port_all_channels_, 0.0f) > 0.5f);
+    // all_channels defaults to 1.0 (true) — blacklist mode.
+    params.all_channels = (read_float(port_all_channels_, 1.0f) > 0.5f);
 
     {
         const float mode_f = read_float(port_smoothing_mode_, 0.0f);
@@ -150,11 +155,11 @@ void MidiSmoothCCPlugin::run(uint32_t n_samples) {
     params.deadband       = clamp_u32(read_float(port_deadband_,         5.0f),   0u,    20u);
     params.output_rate_hz = clamp_u32(read_float(port_output_rate_hz_, 250.0f),  10u,   500u);
 
-    // Read the 16 per-channel toggles. Default 1.0 (all channels on) so
-    // that an unconnected port preserves the previous channel_mask=0xFFFF
-    // default behavior.
+    // Read the 16 per-channel toggles. Default: channel_1 (index 0) = 1.0,
+    // channels 2-16 (indices 1..15) = 0.0. Combined with all_channels=true
+    // (blacklist), this excludes Channel 1 and processes channels 2-16.
     for (uint32_t i = 0u; i < PORT_CHANNEL_SEL_COUNT; ++i) {
-        const float default_val = 1.0f;
+        const float default_val = (i == 0u) ? 1.0f : 0.0f;
         params.channel_selection[i] =
             (read_float(port_channel_selection_[i], default_val) > 0.5f);
     }

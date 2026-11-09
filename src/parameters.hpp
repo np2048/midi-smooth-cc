@@ -9,7 +9,7 @@
 // at the top of run() and stores the resulting values into a PluginParameters
 // instance, which is then consulted throughout the real-time processing path.
 //
-// Default values (fine-tuned for v1.0):
+// Default values:
 //   enabled           = true
 //   smoothing_mode    = Exponential
 //   attack_ms         = 30
@@ -19,15 +19,18 @@
 //   deadband          = 5
 //   output_rate_hz    = 250
 //   all_cc            = false
-//   all_channels      = false
-//   channel_selection = all 16 channels enabled (indexes 0..15 = true)
+//   all_channels      = true   (blacklist mode)
+//   channel_selection = channel 1 enabled, channels 2-16 disabled
 //   cc_selection      = CC7 (index 7) only
 //
 // Channel selection mirrors the all_cc / cc_selection semantics:
-//   - all_channels=false (default): channel_selection is a whitelist.
+//   - all_channels=false: channel_selection is a whitelist.
 //     Only channels with channel_selection[i]==true are processed.
-//   - all_channels=true: channel_selection is a blacklist.
+//   - all_channels=true (default): channel_selection is a blacklist.
 //     All channels are processed EXCEPT those with channel_selection[i]==true.
+//
+// With the default all_channels=true and channel_selection[0]=true
+// (Channel 1), Channel 1 is excluded and channels 2-16 are processed.
 //
 // No dynamic memory allocation: the only containers are fixed-size
 // std::array<bool, 16> and std::array<bool, 128>.
@@ -55,12 +58,13 @@ inline std::array<bool, 128> default_cc_selection() {
     return sel;
 }
 
-// Returns the default channel selection array: all 16 channels enabled,
-// matching the previous channel_mask = 0xFFFF default. Used as the default
-// value for PluginParameters::channel_selection.
+// Returns the default channel selection array: Channel 1 (index 0) enabled,
+// all other channels disabled. Combined with the default all_channels=true
+// (blacklist mode), this means Channel 1 is excluded and channels 2-16 are
+// processed. Used as the default value for PluginParameters::channel_selection.
 inline std::array<bool, 16> default_channel_selection() {
-    std::array<bool, 16> sel{};
-    sel.fill(true);   // all 16 channels enabled by default
+    std::array<bool, 16> sel{};   // value-initialize all entries to false
+    sel[0] = true;                // Channel 1 (index 0) enabled by default
     return sel;
 }
 
@@ -94,14 +98,16 @@ struct PluginParameters {
     // CC numbers selected in cc_selection are processed (whitelist).
     bool all_cc = false;
 
-    // When true, all MIDI channels are processed unless explicitly disabled
-    // in channel_selection (channel_selection acts as a blacklist). When
-    // false, only the channels selected in channel_selection are processed
-    // (whitelist). Mirrors the all_cc / cc_selection semantics.
-    bool all_channels = false;
+    // When true (default), all MIDI channels are processed unless explicitly
+    // disabled in channel_selection (channel_selection acts as a blacklist).
+    // When false, only the channels selected in channel_selection are
+    // processed (whitelist). Mirrors the all_cc / cc_selection semantics.
+    bool all_channels = true;
 
     // Per-channel enable flag. Index 0..15 corresponds to MIDI channel 1..16
-    // (user-facing numbering). Default: all 16 channels enabled, per spec §12.
+    // (user-facing numbering). Default: Channel 1 (index 0) enabled, all
+    // others disabled. Combined with all_channels=true (blacklist), this
+    // excludes Channel 1 and processes channels 2-16.
     std::array<bool, 16> channel_selection = default_channel_selection();
 
     // Per-CC-number enable flag. Index 0..127 corresponds to CC number.

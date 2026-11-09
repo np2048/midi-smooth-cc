@@ -44,6 +44,11 @@
 //         (regression test, now PASSES after the production fix).
 //     C:  Filter state correctly progresses across 32-bit boundary without
 //         wraparound (regression test, now PASSES after the production fix).
+//
+// NOTE: The MidiProcessorFixture explicitly sets all 16 channel_selection
+// entries to true (via fill(true)) so that tests are independent of the
+// production default_channel_selection() values. This ensures tests
+// continue to pass regardless of changes to the production defaults.
 // =============================================================================
 #include <catch2/catch_test_macros.hpp>
 
@@ -106,7 +111,13 @@ public:
         params_.output_rate_hz  = 100;
         params_.all_cc          = false;
         params_.all_channels    = false;
-        params_.channel_selection = default_channel_selection();
+        // Explicitly enable all 16 channels for testing, independent of
+        // the production default_channel_selection() which now defaults to
+        // only Channel 1 enabled. Tests send CC on MIDI channel 0
+        // (0xB0 = Channel 1), so all_channels=false + channel_selection[0]=true
+        // would suffice, but fill(true) is used to ensure all channels are
+        // processed regardless of which MIDI channel a test event uses.
+        params_.channel_selection.fill(true);
         params_.cc_selection    = default_cc_selection();
     }
 
