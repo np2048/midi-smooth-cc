@@ -13,7 +13,7 @@
 #   - All 140 ports, with indices 0..139 matching src/plugin.hpp exactly:
 #       0     : MIDI Input   (atom:Sequence, InputPort)
 #       1     : MIDI Output  (atom:Sequence, OutputPort)
-#       2     : enabled
+#       2     : enabled       (renamed UI label "Enabled / Bypass")
 #       3     : smoothing_mode (enumeration: Exponential=0, Slew=1)
 #       4     : attack_ms        (1..1000 ms)
 #       5     : release_ms       (1..1000 ms)
@@ -89,16 +89,25 @@ independent filter state for every (channel, CC number) pair.""" ;
         # -----------------------------------------------------------------
         # Port 2: enabled (master bypass toggle)
         #
+        # UI label is "Enabled / Bypass" to make the dual semantics
+        # immediately clear: value 1.0 = ON (smoothing active), value
+        # 0.0 = BYPASS (all MIDI events pass through unchanged, no
+        # smoothing applied — see spec §14 bypass semantics). Disabling
+        # does NOT block MIDI, it only disables the smoothing stage.
+        #
         # Declared lv2:toggled so LV2 hosts render this as a binary On/Off
         # switch or checkbox rather than a continuous float slider. The
         # C++ processing logic in src/plugin.cpp already interprets the
         # value as a boolean threshold (value > 0.5f = ON), so this is
         # purely a UI-hint metadata change. Range stays 0.0..1.0.
+        #
+        # The lv2:symbol "enabled" is kept stable for preset/state
+        # compatibility; only the human-readable lv2:name changes.
         # -----------------------------------------------------------------
         a lv2:InputPort, lv2:ControlPort ;
         lv2:index 2 ;
         lv2:symbol "enabled" ;
-        lv2:name "Enabled" ;
+        lv2:name "Enabled / Bypass" ;
         lv2:default 1.0 ;
         lv2:minimum 0.0 ;
         lv2:maximum 1.0 ;
